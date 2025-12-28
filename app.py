@@ -130,8 +130,8 @@ def initialize_session_state():
         # Initialize vector store (expensive to create, so cache it)
         st.session_state.vector_store = ChromaDBStore()
 
-        # Available collections
-        st.session_state.collections = ['Bioinformatics', 'AI_Agent', 'Miscellaneous']
+        # Available collections (fixed list - only these three)
+        st.session_state.collections = ['Bioinformatics', 'AI-Agent', 'Miscellaneous']
 
         # Set default collection
         st.session_state.active_collection = 'Bioinformatics'
@@ -243,22 +243,20 @@ def display_sources(sources: list, use_expanders: bool = True):
     for idx, source in enumerate(sources, start=1):
         metadata = source['metadata']
         filename = metadata.get('filename', 'Unknown')
-        chunk_id = metadata.get('chunk_id', '?')
         distance = source.get('distance', 0)
 
         # Calculate similarity score (0-1, higher is better)
         similarity = 1 / (1 + distance)
 
         if use_expanders:
-            with st.expander(f"Source {idx}: {filename} (Chunk {chunk_id}) - Similarity: {similarity:.2%}"):
+            with st.expander(f"Source {idx}: {filename} - Similarity: {similarity:.2%}"):
                 st.markdown(f"**File:** {filename}")
-                st.markdown(f"**Chunk ID:** {chunk_id}")
                 st.markdown(f"**Relevance Score:** {similarity:.2%}")
                 st.markdown("**Content:**")
                 st.text(source['text'])
         else:
             # Display without expander (for when already inside an expander)
-            st.markdown(f"**Source {idx}: {filename} (Chunk {chunk_id})**")
+            st.markdown(f"**Source {idx}: {filename}**")
             st.markdown(f"- Relevance Score: {similarity:.2%}")
             st.markdown(f"- Content Preview: {source['text'][:200]}...")
             st.markdown("---")
@@ -553,27 +551,38 @@ def render_document_qa_mode():
         st.markdown("---")
         st.subheader("📊 All Collections")
 
-        # Show stats for all collections
+        # Show stats for only the allowed collections
         all_stats = st.session_state.vector_store.get_all_collections_stats()
         for col_stats in all_stats:
             col_name = col_stats['name']
-            doc_count = col_stats['document_count']
-            chunk_count = col_stats['chunk_count']
 
-            # Highlight active collection
+            # Only show stats for the three allowed collections
+            if col_name not in st.session_state.collections:
+                continue
+            doc_count = col_stats['document_count']
+
+            # Get actual documents from ChromaDB for this collection
+            # Temporarily switch to the collection to get its documents
+            current_active = st.session_state.vector_store.collection_name
+            st.session_state.vector_store.set_collection(col_name)
+            docs_in_collection = st.session_state.vector_store.get_all_documents()
+            # Switch back to the active collection
+            st.session_state.vector_store.set_collection(current_active)
+
+            # Create expander with collection name and document count
             if col_name == st.session_state.active_collection:
-                st.metric(
-                    f"✓ {col_name}",
-                    f"{doc_count} docs",
-                    delta=f"{chunk_count} chunks",
-                    help="Currently active collection"
-                )
+                expander_label = f"✓ {col_name} ({doc_count} docs) - Active"
             else:
-                st.metric(
-                    col_name,
-                    f"{doc_count} docs",
-                    delta=f"{chunk_count} chunks"
-                )
+                expander_label = f"{col_name} ({doc_count} docs)"
+
+            with st.expander(expander_label, expanded=False):
+                if docs_in_collection:
+                    st.markdown("**Documents:**")
+                    for i, doc in enumerate(docs_in_collection, 1):
+                        st.markdown(f"{i}. 📄 {doc['filename']}")
+                        st.caption(f"   Uploaded: {doc['upload_date']}")
+                else:
+                    st.info("No documents in this collection yet.")
 
         # List uploaded files for current collection
         st.markdown("---")
@@ -584,7 +593,6 @@ def render_document_qa_mode():
             st.subheader(f"📄 Documents in {active_col}")
             for file_info in uploaded_in_collection:
                 with st.expander(f"📄 {file_info['filename']}"):
-                    st.write(f"**Chunks:** {file_info['chunk_count']}")
                     st.write(f"**Uploaded:** {file_info['upload_date']}")
 
         # Clear current collection button

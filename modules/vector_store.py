@@ -453,6 +453,49 @@ class ChromaDBStore:
 
         return sorted(list(filenames))
 
+    def get_all_documents(self) -> List[Dict[str, Any]]:
+        """
+        Get list of all unique documents in the current collection.
+
+        Returns:
+            List of document info dictionaries with filename and upload date
+
+        Example:
+            >>> docs = store.get_all_documents()
+            >>> for doc in docs:
+            ...     print(f"{doc['filename']} - {doc['upload_date']}")
+        """
+        if not self.collection:
+            return []
+
+        # Get all documents in the collection
+        results = self.collection.get(
+            include=['metadatas']
+        )
+
+        metadatas = results.get('metadatas', [])
+
+        if not metadatas:
+            return []
+
+        # Extract unique filenames
+        seen_files = set()
+        documents = []
+
+        for metadata in metadatas:
+            filename = metadata.get('filename', 'Unknown')
+
+            if filename not in seen_files:
+                seen_files.add(filename)
+                documents.append({
+                    'filename': filename,
+                    'upload_date': metadata.get('upload_date', 'Unknown')
+                })
+
+        # Sort by filename
+        documents.sort(key=lambda x: x['filename'])
+        return documents
+
     def get_file_info(self, filename: str) -> Optional[Dict[str, Any]]:
         """
         Get information about a specific file in the collection.
