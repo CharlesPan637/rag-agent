@@ -1,0 +1,20 @@
+# Core Framework
+streamlit==1.32.0
+
+# LLM Provider
+openai==1.12.0
+
+# Vector Database
+chromadb==0.4.24
+
+# Document Processing
+pypdf==4.1.0              # PDF parsing
+python-docx==1.1.0        # DOCX parsing
+
+# Embeddings
+sentence-transformers==2.5.1  # Local embeddings
+torch==2.2.1              # Required by sentence-transformers
+
+# Utilities
+python-dotenv==1.0.1      # Environment variable management
+chardet==5.2.0            # Encoding detection for text files
