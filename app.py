@@ -28,6 +28,7 @@ from pathlib import Path
 from datetime import datetime
 import re
 from io import BytesIO
+from typing import Dict, List, Any
 from docx import Document
 from docx.shared import Pt, RGBColor, Inches
 from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
@@ -155,6 +156,12 @@ def initialize_session_state():
         # Research mode variables
         st.session_state.research_history = []
         st.session_state.current_research = None
+
+        # Chat agent variables for Web Research
+        st.session_state.research_chat_messages = []
+        st.session_state.research_chat_enabled = None  # None = no mode selected yet
+        st.session_state.awaiting_clarification = False
+        st.session_state.pending_topic = None
 
 
 # ============================================================================
@@ -429,6 +436,200 @@ def add_hyperlink(paragraph, url, text):
 
     # Add the hyperlink to the paragraph
     paragraph._p.append(hyperlink)
+
+
+# ============================================================================
+# Chat Agent Helper Functions
+# ============================================================================
+
+def check_topic_ambiguity(topic: str) -> Dict[str, Any]:
+    """
+    Check if a research topic needs clarification using GPT.
+
+    Learning Note - Why Check for Ambiguity?
+    ----------------------------------------
+    Users often provide vague topics like:
+    - "AI" (too broad - AI in what context?)
+    - "the latest developments" (in what field?)
+    - "it" (what does "it" refer to?)
+
+    By detecting ambiguity upfront, we can ask clarifying questions
+    and conduct more targeted research that actually answers what
+    the user wants to know.
+
+    Args:
+        topic: The research topic entered by user
+
+    Returns:
+        Dictionary with:
+        - is_ambiguous: bool (True if needs clarification)
+        - clarification_questions: List[str] (questions to ask user)
+        - reasoning: str (why it's ambiguous or not)
+
+    Example:
+        >>> result = check_topic_ambiguity("AI")
+        >>> if result['is_ambiguous']:
+        ...     for q in result['clarification_questions']:
+        ...         print(f"- {q}")
+    """
+    try:
+        # Use OpenAI to analyze the topic
+        prompt = f"""You are a research assistant helping clarify user research topics.
+
+Analyze this research topic: "{topic}"
+
+Determine if the topic is clear enough to research, or if it's ambiguous and needs clarification.
+
+A topic is AMBIGUOUS if:
+- It's too broad or vague (e.g., "AI", "technology", "climate")
+- It uses pronouns without context (e.g., "it", "this", "that")
+- It's unclear what specific aspect the user wants (e.g., "latest developments" without specifying the field)
+- It could mean multiple different things
+
+A topic is CLEAR if:
+- It specifies the domain and focus (e.g., "AI applications in radiology 2024")
+- It's specific enough to guide research (e.g., "quantum computing error correction techniques")
+- The user's intent is obvious
+
+Respond in JSON format:
+{{
+    "is_ambiguous": true/false,
+    "reasoning": "brief explanation of why it is/isn't ambiguous",
+    "clarification_questions": ["question 1", "question 2", "question 3"] (only if ambiguous, otherwise empty list)
+}}
+
+The clarification questions should help narrow down what the user actually wants to know.
+Examples:
+- "Which specific application area are you interested in?"
+- "Are you looking for recent developments or fundamental concepts?"
+- "Which time period or year are you focusing on?"
+
+Respond ONLY with valid JSON, no other text."""
+
+        # Call OpenAI API
+        response = client.chat.completions.create(
+            model=settings.LLM_MODEL,
+            messages=[
+                {"role": "system", "content": "You are a helpful research assistant that detects ambiguous topics."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3,  # Lower temperature for more consistent analysis
+            max_tokens=500
+        )
+
+        # Parse response
+        response_text = response.choices[0].message.content.strip()
+
+        # Try to extract JSON from response
+        import json
+        import re
+
+        # Sometimes the model wraps JSON in markdown code blocks
+        json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', response_text, re.DOTALL)
+        if json_match:
+            response_text = json_match.group(1)
+
+        result = json.loads(response_text)
+
+        # Validate result has required keys
+        if 'is_ambiguous' not in result:
+            result['is_ambiguous'] = False
+        if 'reasoning' not in result:
+            result['reasoning'] = 'Unable to determine'
+        if 'clarification_questions' not in result:
+            result['clarification_questions'] = []
+
+        return result
+
+    except Exception as e:
+        print(f"Error checking topic ambiguity: {e}")
+        # Default to not ambiguous on error (fail open)
+        return {
+            'is_ambiguous': False,
+            'reasoning': f'Error during analysis: {str(e)}',
+            'clarification_questions': []
+        }
+
+
+def generate_chat_response(user_message: str, research_context: Dict[str, Any] = None) -> str:
+    """
+    Generate a conversational response using the research context.
+
+    Learning Note - Chat vs Direct Research:
+    ---------------------------------------
+    Direct research: User provides topic → immediate search
+    Chat: User asks question → we check context → provide answer or research
+
+    This allows:
+    - Follow-up questions: "What about the cost?" (knows we're discussing quantum computing)
+    - Clarifications: "I meant AI in healthcare" (after initial ambiguous query)
+    - Refinements: "Focus on 2024 only" (narrowing previous results)
+
+    Args:
+        user_message: The user's chat message
+        research_context: Optional dict with previous research results
+            {
+                'topic': str,
+                'report': str,
+                'sources': List[Dict],
+                'chunks': List[Dict]  # Raw chunks for RAG retrieval
+            }
+
+    Returns:
+        str: AI-generated response
+
+    Example:
+        >>> # After researching "quantum computing"
+        >>> response = generate_chat_response(
+        ...     "What about the costs?",
+        ...     research_context=previous_research
+        ... )
+    """
+    try:
+        # Build context from previous research if available
+        context_text = ""
+        if research_context:
+            context_text = f"""
+Previous Research Topic: {research_context.get('topic', 'N/A')}
+
+Previous Research Report:
+{research_context.get('report', 'No previous research available')}
+
+Use this context to answer follow-up questions. If the user's question is related to the previous research, use the information from the report. If it's a new topic, indicate that new research would be needed.
+"""
+
+        # Build conversation prompt
+        prompt = f"""You are a helpful research assistant. You help users clarify their research topics and answer follow-up questions about research results.
+
+{context_text}
+
+User's message: {user_message}
+
+Instructions:
+- If this is a follow-up question about previous research, answer using the context provided
+- If this is a new topic that needs research, acknowledge it and suggest conducting research
+- Be conversational and helpful
+- Keep responses concise (2-4 paragraphs max)
+- If you mention sources, reference them clearly
+
+Respond naturally to the user's message:"""
+
+        # Call OpenAI API
+        response = client.chat.completions.create(
+            model=settings.LLM_MODEL,
+            messages=[
+                {"role": "system", "content": "You are a helpful research assistant."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7,
+            max_tokens=800
+        )
+
+        return response.choices[0].message.content.strip()
+
+    except Exception as e:
+        print(f"Error generating chat response: {e}")
+        return f"I apologize, but I encountered an error: {str(e)}. Please try rephrasing your message."
 
 
 # ============================================================================
@@ -734,6 +935,212 @@ def render_document_qa_mode():
     )
 
 
+def render_research_chat_interface():
+    """
+    Render the chat interface for conversational research.
+
+    Learning Note - Why Chat for Research?
+    -------------------------------------
+    Chat interfaces allow:
+    1. Clarification: "Did you mean AI in healthcare or AI in general?"
+    2. Refinement: "Let's focus on 2024 developments only"
+    3. Follow-ups: "What about the costs?" after initial research
+    4. Natural interaction: Users can express intent conversationally
+
+    This is especially helpful for:
+    - Vague topics that need narrowing
+    - Complex topics that benefit from dialogue
+    - Users who prefer conversation over forms
+    """
+    st.markdown("Chat with the AI to research any topic. I'll ask clarifying questions if needed!")
+
+    # Display chat history
+    for message in st.session_state.research_chat_messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    # Chat input
+    if prompt := st.chat_input("What would you like to research?"):
+        # Add user message to chat
+        st.session_state.research_chat_messages.append({"role": "user", "content": prompt})
+
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        # Process the message
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
+                # Check if we're awaiting clarification
+                if st.session_state.awaiting_clarification:
+                    # User provided clarification, use it to refine the pending topic
+                    refined_topic = f"{st.session_state.pending_topic} - {prompt}"
+                    st.session_state.awaiting_clarification = False
+                    st.session_state.pending_topic = None
+
+                    # Now conduct research with the refined topic
+                    st.markdown(f"Great! I'll research: **{refined_topic}**")
+                    st.session_state.research_chat_messages.append({
+                        "role": "assistant",
+                        "content": f"Great! I'll research: **{refined_topic}**"
+                    })
+
+                    # Conduct research (similar to direct mode but triggered from chat)
+                    try:
+                        progress_placeholder = st.empty()
+                        progress_placeholder.text("Starting research...")
+
+                        # Use fixed collection name for all web research
+                        research_vector_store = ChromaDBStore()
+                        research_vector_store.set_collection(settings.RESEARCH_COLLECTION_NAME)
+                        research_agent = ResearchAgent(research_vector_store, search_depth="basic")
+
+                        # Conduct research with default settings
+                        result = research_agent.conduct_research(
+                            topic=refined_topic,
+                            num_queries=4,
+                            progress_callback=lambda msg, pct: progress_placeholder.text(msg)
+                        )
+
+                        progress_placeholder.empty()
+
+                        # Store in session state
+                        research_record = {
+                            'topic': refined_topic,
+                            'report': result['report'],
+                            'sources': result['sources'],
+                            'timestamp': datetime.now().isoformat(),
+                            'num_sources': len(result['sources']),
+                            'num_chunks': result['num_chunks'],
+                            'search_quality': result['search_quality']
+                        }
+
+                        st.session_state.current_research = research_record
+                        st.session_state.research_history.insert(0, research_record)
+
+                        # Show success message in chat
+                        success_msg = f"✅ Research complete! I found {len(result['sources'])} sources. Check below for the full report!"
+                        st.markdown(success_msg)
+                        st.session_state.research_chat_messages.append({
+                            "role": "assistant",
+                            "content": success_msg
+                        })
+
+                        st.rerun()
+
+                    except Exception as e:
+                        error_msg = f"❌ Research failed: {str(e)}"
+                        st.markdown(error_msg)
+                        st.session_state.research_chat_messages.append({
+                            "role": "assistant",
+                            "content": error_msg
+                        })
+
+                else:
+                    # Check if this is a follow-up question about existing research
+                    if st.session_state.current_research and not any(
+                        keyword in prompt.lower()
+                        for keyword in ['research', 'study', 'investigate', 'find out about', 'tell me about']
+                    ):
+                        # This looks like a follow-up question about current research
+                        response = generate_chat_response(
+                            prompt,
+                            research_context=st.session_state.current_research
+                        )
+                        st.markdown(response)
+                        st.session_state.research_chat_messages.append({
+                            "role": "assistant",
+                            "content": response
+                        })
+                        st.rerun()
+
+                    else:
+                        # This is a new research topic - check for ambiguity
+                        ambiguity_result = check_topic_ambiguity(prompt)
+
+                        if ambiguity_result['is_ambiguous']:
+                            # Topic is ambiguous - ask for clarification
+                            clarification_msg = f"""I'd be happy to research that, but I need some clarification first:
+
+**Reasoning:** {ambiguity_result['reasoning']}
+
+**Questions to help narrow it down:**
+"""
+                            for i, question in enumerate(ambiguity_result['clarification_questions'], 1):
+                                clarification_msg += f"\n{i}. {question}"
+
+                            clarification_msg += "\n\nPlease provide more details so I can conduct better research for you!"
+
+                            st.markdown(clarification_msg)
+                            st.session_state.research_chat_messages.append({
+                                "role": "assistant",
+                                "content": clarification_msg
+                            })
+
+                            # Mark that we're awaiting clarification
+                            st.session_state.awaiting_clarification = True
+                            st.session_state.pending_topic = prompt
+                            st.rerun()
+
+                        else:
+                            # Topic is clear - proceed with research
+                            st.markdown(f"Great topic! I'll research: **{prompt}**")
+                            st.session_state.research_chat_messages.append({
+                                "role": "assistant",
+                                "content": f"Great topic! I'll research: **{prompt}**"
+                            })
+
+                            # Conduct research
+                            try:
+                                progress_placeholder = st.empty()
+                                progress_placeholder.text("Starting research...")
+
+                                # Use fixed collection name for all web research
+                                research_vector_store = ChromaDBStore()
+                                research_vector_store.set_collection(settings.RESEARCH_COLLECTION_NAME)
+                                research_agent = ResearchAgent(research_vector_store, search_depth="basic")
+
+                                # Conduct research with default settings
+                                result = research_agent.conduct_research(
+                                    topic=prompt,
+                                    num_queries=4,
+                                    progress_callback=lambda msg, pct: progress_placeholder.text(msg)
+                                )
+
+                                progress_placeholder.empty()
+
+                                # Store in session state
+                                research_record = {
+                                    'topic': prompt,
+                                    'report': result['report'],
+                                    'sources': result['sources'],
+                                    'timestamp': datetime.now().isoformat(),
+                                    'num_sources': len(result['sources']),
+                                    'num_chunks': result['num_chunks'],
+                                    'search_quality': result['search_quality']
+                                }
+
+                                st.session_state.current_research = research_record
+                                st.session_state.research_history.insert(0, research_record)
+
+                                # Show success message in chat
+                                success_msg = f"✅ Research complete! I found {len(result['sources'])} sources. Check below for the full report!"
+                                st.markdown(success_msg)
+                                st.session_state.research_chat_messages.append({
+                                    "role": "assistant",
+                                    "content": success_msg
+                                })
+
+                                st.rerun()
+
+                            except Exception as e:
+                                error_msg = f"❌ Research failed: {str(e)}"
+                                st.markdown(error_msg)
+                                st.session_state.research_chat_messages.append({
+                                    "role": "assistant",
+                                    "content": error_msg
+                                })
+
+
 def render_research_mode():
     """
     Render the Web Research interface.
@@ -750,6 +1157,22 @@ def render_research_mode():
     Enter any topic and the AI will research it for you! The system will search multiple web sources,
     analyze findings, and generate a comprehensive research report with citations.
     """)
+
+    # Research Mode Toggle
+    st.markdown("### Select Research Mode")
+    col_mode1, col_mode2 = st.columns(2)
+    with col_mode1:
+        if st.button("💬 Chat Mode", use_container_width=True,
+                    type="primary" if st.session_state.research_chat_enabled == True else "secondary",
+                    help="Conversational interface with clarification and follow-up questions"):
+            st.session_state.research_chat_enabled = True
+            st.rerun()
+    with col_mode2:
+        if st.button("🚀 Direct Research", use_container_width=True,
+                    type="primary" if st.session_state.research_chat_enabled == False else "secondary",
+                    help="Immediate research without conversation"):
+            st.session_state.research_chat_enabled = False
+            st.rerun()
 
     # Check if Tavily API key is configured
     if not settings.TAVILY_API_KEY:
@@ -791,111 +1214,95 @@ def render_research_mode():
         else:
             st.info("No research history yet. Start your first research!")
 
-    # Main area - Research interface
-    st.markdown("### 🔍 Research a Topic")
-
-    # Research topic input
-    topic = st.text_area(
-        "Research Topic:",
-        placeholder="e.g., 'Latest developments in quantum computing' or 'AI applications in healthcare 2024'",
-        height=100,
-        help="Enter any topic you'd like to research. The agent will search multiple sources and synthesize findings."
-    )
-
-    # Collection name input
-    collection_name = st.text_input(
-        "Collection Name (Optional):",
-        placeholder="e.g., 'Quantum Computing Research' or 'Healthcare AI Study'",
-        help="Give this research collection a name to organize it separately. Leave empty to auto-generate from topic."
-    )
-
-    # Research configuration
-    col1, col2 = st.columns(2)
-    with col1:
-        search_depth = st.selectbox(
-            "Search Depth:",
-            options=["basic", "advanced"],
-            help="Basic: Faster and cheaper (1-2s per query). Advanced: More thorough (3-4s per query)."
-        )
-    with col2:
-        num_queries = st.slider(
-            "Number of Search Queries:",
-            min_value=3,
-            max_value=5,
-            value=4,
-            help="More queries = better coverage but higher cost. Recommended: 4"
+    # Main area - Render appropriate interface based on mode
+    if st.session_state.research_chat_enabled is None:
+        # No mode selected yet - show prompt
+        st.info("👆 Please select a research mode above to get started!")
+    elif st.session_state.research_chat_enabled == True:
+        # ===== CHAT MODE =====
+        render_research_chat_interface()
+    elif st.session_state.research_chat_enabled == False:
+        # ===== DIRECT RESEARCH MODE =====
+        # Research topic input
+        topic = st.text_area(
+            "Research Topic:",
+            placeholder="e.g., 'Latest developments in quantum computing' or 'AI applications in healthcare 2024'",
+            height=100,
+            help="Enter any topic you'd like to research. The agent will search multiple sources and synthesize findings."
         )
 
-    # Start research button
-    if st.button("🔍 Start Research", type="primary", disabled=not topic.strip()):
-        with st.spinner("Conducting research..."):
-            try:
-                # Progress tracking
-                progress_bar = st.progress(0)
-                status_text = st.empty()
+        # Research configuration
+        col1, col2 = st.columns(2)
+        with col1:
+            search_depth = st.selectbox(
+                "Search Depth:",
+                options=["basic", "advanced"],
+                help="Basic: Faster and cheaper (1-2s per query). Advanced: More thorough (3-4s per query)."
+            )
+        with col2:
+            num_queries = st.slider(
+                "Number of Search Queries:",
+                min_value=3,
+                max_value=5,
+                value=4,
+                help="More queries = better coverage but higher cost. Recommended: 4"
+            )
 
-                def update_progress(msg, pct):
-                    """Progress callback for research agent."""
-                    status_text.text(msg)
-                    progress_bar.progress(pct / 100)
+        # Start research button
+        if st.button("🔍 Start Research", type="primary", disabled=not topic.strip()):
+            with st.spinner("Conducting research..."):
+                try:
+                    # Progress tracking
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
 
-                # Initialize research components
-                status_text.text("Initializing research agent...")
-                progress_bar.progress(0.1)
+                    def update_progress(msg, pct):
+                        """Progress callback for research agent."""
+                        status_text.text(msg)
+                        progress_bar.progress(pct / 100)
 
-                # Generate collection name if not provided
-                if not collection_name or not collection_name.strip():
-                    # Auto-generate from topic (sanitize for use as collection name)
-                    import re
-                    clean_topic = re.sub(r'[^a-zA-Z0-9\s]', '', topic)[:50]
-                    clean_topic = re.sub(r'\s+', '_', clean_topic.strip())
-                    final_collection_name = f"research_{clean_topic.lower()}"
-                else:
-                    # Use provided name (sanitize it)
-                    import re
-                    clean_name = re.sub(r'[^a-zA-Z0-9\s]', '', collection_name)[:50]
-                    final_collection_name = re.sub(r'\s+', '_', clean_name.strip().lower())
+                    # Initialize research components
+                    status_text.text("Initializing research agent...")
+                    progress_bar.progress(0.1)
 
-                # Create vector store and set it to the named collection
-                research_vector_store = ChromaDBStore()
-                research_vector_store.set_collection(final_collection_name)
-                research_agent = ResearchAgent(research_vector_store, search_depth=search_depth)
+                    # Use fixed collection name for all web research
+                    research_vector_store = ChromaDBStore()
+                    research_vector_store.set_collection(settings.RESEARCH_COLLECTION_NAME)
+                    research_agent = ResearchAgent(research_vector_store, search_depth=search_depth)
 
-                # Conduct research
-                result = research_agent.conduct_research(
-                    topic=topic,
-                    num_queries=num_queries,
-                    progress_callback=update_progress
-                )
+                    # Conduct research
+                    result = research_agent.conduct_research(
+                        topic=topic,
+                        num_queries=num_queries,
+                        progress_callback=update_progress
+                    )
 
-                # Clear progress indicators
-                progress_bar.empty()
-                status_text.empty()
+                    # Clear progress indicators
+                    progress_bar.empty()
+                    status_text.empty()
 
-                # Store in session state
-                research_record = {
-                    'topic': topic,
-                    'collection_name': final_collection_name,
-                    'collection_title': collection_name if collection_name.strip() else topic[:50],
-                    'report': result['report'],
-                    'sources': result['sources'],
-                    'timestamp': datetime.now().isoformat(),
-                    'num_sources': len(result['sources']),
-                    'num_chunks': result['num_chunks'],
-                    'search_quality': result['search_quality']
-                }
+                    # Store in session state
+                    research_record = {
+                        'topic': topic,
+                        'report': result['report'],
+                        'sources': result['sources'],
+                        'timestamp': datetime.now().isoformat(),
+                        'num_sources': len(result['sources']),
+                        'num_chunks': result['num_chunks'],
+                        'search_quality': result['search_quality']
+                    }
 
-                st.session_state.current_research = research_record
-                st.session_state.research_history.insert(0, research_record)
+                    st.session_state.current_research = research_record
+                    st.session_state.research_history.insert(0, research_record)
 
-                st.success(f"✅ Research complete! Synthesized findings from {len(result['sources'])} sources.")
+                    st.success(f"✅ Research complete! Synthesized findings from {len(result['sources'])} sources.")
 
-                # Trigger rerun to display the report
-                st.rerun()
+                    # Trigger rerun to display the report
+                    st.rerun()
 
-            except Exception as e:
-                st.error(f"❌ Research failed: {str(e)}")
-                st.error("Please check your API keys and try again.")
+                except Exception as e:
+                    st.error(f"❌ Research failed: {str(e)}")
+                    st.error("Please check your API keys and try again.")
 
     # Display current or most recent research
     if st.session_state.current_research:
