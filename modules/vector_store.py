@@ -166,6 +166,12 @@ class ChromaDBStore:
         if not chunks:
             return 0
 
+        # Debug: Check what we received
+        if chunks and not isinstance(chunks[0], dict):
+            print(f"ERROR: Expected chunks to be list of dicts, got: {type(chunks[0])}")
+            print(f"First chunk: {chunks[0][:100] if isinstance(chunks[0], str) else chunks[0]}")
+            raise TypeError(f"Chunks must be list of dictionaries, got list of {type(chunks[0])}")
+
         # Extract texts for embedding generation
         texts = [chunk['text'] for chunk in chunks]
 

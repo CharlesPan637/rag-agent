@@ -1,6 +1,6 @@
-# 📚 RAG Agent - Document Q&A System
+# 📚 RAG Agent - Document Q&A & Web Research System
 
-A beginner-friendly Retrieval Augmented Generation (RAG) system that allows you to upload documents and ask questions about them using AI. Built with Streamlit, ChromaDB, and Anthropic's Claude.
+A beginner-friendly Retrieval Augmented Generation (RAG) system with **dual modes**: upload documents for Q&A, or research any topic using web search. Built with Streamlit, ChromaDB, OpenAI GPT, and Tavily AI Search.
 
 ## 🎯 What is RAG?
 
@@ -18,13 +18,28 @@ A beginner-friendly Retrieval Augmented Generation (RAG) system that allows you 
 
 ## ✨ Features
 
-- 📄 **Multi-format support**: PDF, Microsoft Word (.docx), and plain text files
-- 🔍 **Semantic search**: Finds relevant content based on meaning, not just keywords
-- 💾 **Persistent storage**: Documents saved between sessions using ChromaDB
-- 📚 **Source citations**: See exactly which document and section answers came from
-- 🤖 **Powered by Claude**: Uses Anthropic's Claude AI for high-quality answers
-- 🎨 **Clean UI**: Intuitive Streamlit interface with chat-style interaction
-- 🔒 **Local embeddings**: Uses sentence-transformers (runs locally, no API calls)
+### 📄 Document Q&A Mode
+- **Multi-format support**: PDF, Microsoft Word (.docx), and plain text files
+- **Semantic search**: Finds relevant content based on meaning, not just keywords
+- **Persistent storage**: Documents saved between sessions using ChromaDB
+- **Source citations**: See exactly which document and section answers came from
+- **Chat interface**: Interactive Q&A with conversation history
+
+### 🌐 Web Research Mode (NEW!)
+- **Automated web research**: Enter any topic and get a comprehensive research report
+- **Multi-source synthesis**: Searches multiple queries to gather diverse perspectives
+- **Smart content processing**: Deduplicates and ranks sources by relevance
+- **Structured reports**: Executive summary, key findings, detailed analysis, and sources
+- **Full citations**: All sources include URLs, titles, and relevance scores
+- **Research history**: Save and revisit past research
+
+### 🛠️ Technical Features
+- **Dual-mode interface**: Switch between Document Q&A and Web Research
+- **Local embeddings**: Uses sentence-transformers (runs locally, no API calls)
+- **Vector database**: ChromaDB for efficient similarity search
+- **Powered by OpenAI GPT**: High-quality answer generation and synthesis
+- **Tavily AI Search**: Purpose-built search API for research applications
+- **Beginner-friendly code**: Extensive comments explaining every concept
 
 ## 🏗️ Architecture
 
@@ -49,7 +64,8 @@ Display Answer + Sources
 ## 📋 Prerequisites
 
 - **Python 3.8 or higher**
-- **Anthropic API Key** - Get one from [console.anthropic.com](https://console.anthropic.com/)
+- **OpenAI API Key** - Required for both modes. Get one from [platform.openai.com](https://platform.openai.com/)
+- **Tavily API Key** - Required for Web Research mode. Get one from [tavily.com](https://tavily.com/)
 - **Basic command line knowledge**
 - **8GB+ RAM recommended** (for embedding model)
 
@@ -95,26 +111,36 @@ pip install -r requirements.txt
 
 Installation may take 2-5 minutes depending on your connection.
 
-### Step 4: Configure API Key
+### Step 4: Configure API Keys
 
 1. Copy the example environment file:
    ```bash
    cp .env.example .env
    ```
 
-2. Open `.env` in a text editor and add your Anthropic API key:
+2. Open `.env` in a text editor and add your API keys:
    ```
-   ANTHROPIC_API_KEY=your_actual_api_key_here
+   OPENAI_API_KEY=your_openai_api_key_here
+   TAVILY_API_KEY=your_tavily_api_key_here
    ```
 
 3. Save the file
 
-**Getting an API Key:**
-1. Go to [console.anthropic.com](https://console.anthropic.com/)
+**Getting API Keys:**
+
+**OpenAI (Required for both modes):**
+1. Go to [platform.openai.com](https://platform.openai.com/)
 2. Sign up or log in
 3. Navigate to API Keys
 4. Create a new key
 5. Copy and paste it into your `.env` file
+
+**Tavily (Required for Web Research mode):**
+1. Go to [tavily.com](https://tavily.com/)
+2. Sign up for a free account
+3. Get your API key from the dashboard
+4. Copy and paste it into your `.env` file
+5. **Note**: Tavily offers a free tier for testing!
 
 ## 🎮 Usage
 
@@ -167,11 +193,129 @@ Click the **"View Sources"** expander below each answer to see:
 - Relevance scores
 - The actual text from each chunk
 
+## 🌐 Web Research Mode
+
+### Switching to Research Mode
+
+1. Click the **"🌐 Web Research"** button at the top of the page
+2. The interface will switch to research mode
+
+### Conducting Research
+
+1. **Enter Your Topic**: Type any research topic in the text area
+   - Be specific but not too narrow
+   - Include year for recent information (e.g., "AI healthcare 2024")
+   - Example topics:
+     - "Latest developments in quantum computing"
+     - "AI applications in healthcare 2024"
+     - "Best practices for microservices architecture"
+     - "Climate change mitigation strategies"
+
+2. **Configure Search** (Optional):
+   - **Search Depth**: Choose "basic" (faster, cheaper) or "advanced" (more thorough)
+   - **Number of Queries**: Select 3-5 (more queries = better coverage but higher cost)
+
+3. **Start Research**: Click the "🔍 Start Research" button
+
+4. **Wait for Results** (~20-30 seconds):
+   - The system will generate diverse search queries
+   - Search multiple web sources
+   - Process and deduplicate results
+   - Store in vector database
+   - Synthesize comprehensive report
+
+5. **View Report**: The research report includes:
+   - **Executive Summary**: Quick overview of key findings
+   - **Key Findings**: Main insights organized by theme with citations
+   - **Detailed Analysis**: In-depth discussion with source references
+   - **Conclusion**: Summary synthesis
+   - **Sources**: Full list of sources with URLs and relevance scores
+
+### Research Report Structure
+
+```markdown
+## Executive Summary
+Concise overview (2-3 sentences)
+
+## Key Findings
+- Finding 1: [Description] [Source 1]
+- Finding 2: [Description] [Source 2, Source 3]
+- Finding 3: [Description] [Source 4]
+
+## Detailed Analysis
+### Concept/Theme 1
+[In-depth discussion citing sources]
+
+### Concept/Theme 2
+[In-depth discussion citing sources]
+
+## Conclusion
+[Overall synthesis]
+
+## Sources
+1. [Title](URL) - Relevance: 0.95
+2. [Title](URL) - Relevance: 0.89
+...
+```
+
+### Research History
+
+- All research is saved in the **Research History** sidebar
+- Click on any past research to view it again
+- Clear history with the "🗑️ Clear History" button
+
+### How Web Research Works
+
+1. **Query Expansion**: Generates 3-5 diverse search queries from your topic
+   - Direct query
+   - Specific applications
+   - Technical focus
+   - Recent developments
+
+2. **Web Search**: Executes searches via Tavily AI
+   - Searches professional websites, blogs, news, and media platforms
+   - Retrieves 5 results per query (20 total)
+
+3. **Deduplication**: Removes duplicate sources
+   - URL-based deduplication
+   - Content similarity checking
+
+4. **Processing**: Cleans and chunks content
+   - Removes HTML artifacts
+   - Intelligent chunking (~800 chars with overlap)
+   - Enriches with metadata (URLs, dates, scores)
+
+5. **Storage**: Stores in vector database
+   - Separate collection from documents
+   - Enables semantic search
+
+6. **Synthesis**: Generates comprehensive report
+   - Retrieves most relevant chunks
+   - Uses OpenAI GPT to synthesize findings
+   - Cites all sources explicitly
+
+### Cost Estimation
+
+Per research session:
+- **Tavily API**: ~$0.04 (4 searches × $0.01 each)
+- **OpenAI GPT**: ~$0.02 (query generation + synthesis)
+- **Total**: ~$0.06 per research
+
+Very affordable for comprehensive research!
+
+### Tips for Better Research
+
+1. **Be Specific**: "AI in radiology 2024" vs "AI healthcare"
+2. **Include Year**: For recent information
+3. **Use Concrete Terms**: Avoid ambiguous acronyms
+4. **Check Sources**: Review source quality and relevance
+5. **Iterate**: Refine topic based on initial results
+
 ## 📁 Project Structure
 
 ```
 rag_agent/
-├── app.py                          # Main Streamlit application
+├── app.py                          # Main Streamlit application (dual-mode UI)
 ├── requirements.txt                # Python dependencies
 ├── .env                           # Your API keys (DO NOT COMMIT)
 ├── .env.example                   # Template for environment variables
@@ -186,7 +330,10 @@ rag_agent/
 │   ├── document_processor.py     # Parse and chunk documents
 │   ├── embeddings.py             # Generate vector embeddings
 │   ├── vector_store.py           # ChromaDB interface
-│   └── rag_query.py              # RAG pipeline + Claude integration
+│   ├── rag_query.py              # RAG pipeline + OpenAI GPT integration
+│   ├── web_searcher.py           # Tavily API search integration (NEW)
+│   ├── web_content_processor.py  # Process web search results (NEW)
+│   └── research_agent.py         # Research orchestrator (NEW)
 │
 ├── utils/
 │   ├── __init__.py
@@ -195,6 +342,8 @@ rag_agent/
 └── data/
     ├── uploads/                  # Temporary uploaded files
     └── chroma_db/                # ChromaDB persistent storage
+        ├── documents/            # Document Q&A collections
+        └── web_research/         # Web research collection
 ```
 
 ## 🧠 How It Works (Educational)

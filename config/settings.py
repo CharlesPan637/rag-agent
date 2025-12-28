@@ -113,7 +113,7 @@ SUPPORTED_FILE_TYPES = [".pdf", ".docx", ".txt"]
 # Why 5 chunks?
 # - Too few chunks: might miss relevant information
 # - Too many chunks:
-#   * Costs more (more tokens sent to Claude)
+#   * Costs more (more tokens sent to OpenAI GPT)
 #   * Takes longer to process
 #   * Can dilute relevance with less-related content
 # - 5 is a good starting point, can be adjusted based on your use case
@@ -124,6 +124,76 @@ DEFAULT_RETRIEVAL_COUNT = 5
 # Lower = more lenient, Higher = stricter
 # None = no filtering
 MIN_SIMILARITY_SCORE = None  # Can be set to 0.3 for stricter filtering
+
+# ============================================================================
+# Tavily API Configuration
+# ============================================================================
+
+# Tavily API key for web search (graceful degradation if missing)
+# Get your free API key from: https://tavily.com
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+
+if not TAVILY_API_KEY:
+    print("WARNING: TAVILY_API_KEY not found. Web research features will be disabled.")
+    print("Get your key at: https://tavily.com")
+
+# ============================================================================
+# Research Configuration
+# ============================================================================
+
+# Number of search queries to generate per research topic
+#
+# Learning Note - Why Multiple Queries?
+# -------------------------------------
+# A single query gives you limited perspective on a topic.
+# Multiple diverse queries ensure comprehensive coverage:
+# - Direct query: Uses the topic as-is
+# - Specific applications: Focuses on use cases
+# - Technical focus: Emphasizes implementation details
+# - Recent developments: Captures latest information
+#
+# More queries = better coverage but higher API costs
+# 4 queries is a good balance for most topics
+RESEARCH_QUERIES_COUNT = int(os.getenv("RESEARCH_QUERIES_COUNT", "4"))
+
+# Number of results per search query
+# 5 results × 4 queries = 20 total results to process
+RESULTS_PER_QUERY = int(os.getenv("RESULTS_PER_QUERY", "5"))
+
+# Search depth: "basic" or "advanced"
+#
+# Learning Note - Search Depth Options:
+# -------------------------------------
+# basic: Faster (1-2 seconds per query), cheaper, good for most topics
+# advanced: More thorough (3-4 seconds per query), better for complex/technical topics
+SEARCH_DEPTH = os.getenv("SEARCH_DEPTH", "basic")
+
+# Maximum total results to process per research session
+# This acts as a safety limit to prevent excessive API costs
+MAX_RESEARCH_RESULTS = int(os.getenv("MAX_RESEARCH_RESULTS", "20"))
+
+# Collection name for research results (separate from documents)
+#
+# Learning Note - Why Separate Collections?
+# ------------------------------------------
+# We use different ChromaDB collections for documents vs web research because:
+# - Different metadata schemas (filenames vs URLs)
+# - Different content characteristics (structured docs vs web content)
+# - Easier to clear web research without affecting uploaded documents
+# - Allows different chunk sizes and processing strategies
+RESEARCH_COLLECTION_NAME = "web_research"
+
+# Web content chunking configuration
+#
+# Learning Note - Why Different Chunk Sizes for Web Content?
+# -----------------------------------------------------------
+# Web content is often less structured than documents:
+# - May have navigation elements, ads, etc. (even after cleaning)
+# - Sentences may be shorter and more punchy
+# - Content density varies more
+# - 800 characters with 150 overlap works well for web content
+WEB_CHUNK_SIZE = int(os.getenv("WEB_CHUNK_SIZE", "800"))
+WEB_CHUNK_OVERLAP = int(os.getenv("WEB_CHUNK_OVERLAP", "150"))
 
 # ============================================================================
 # Directory Setup
@@ -159,13 +229,16 @@ def print_config():
     print("=" * 60)
     print("RAG Agent Configuration")
     print("=" * 60)
-    print(f"Claude Model: {CLAUDE_MODEL}")
+    print(f"OpenAI Model: {OPENAI_MODEL}")
     print(f"Embedding Model: {EMBEDDING_MODEL}")
     print(f"Chunk Size: {CHUNK_SIZE} characters")
     print(f"Chunk Overlap: {CHUNK_OVERLAP} characters")
     print(f"ChromaDB Directory: {CHROMA_PERSIST_DIRECTORY}")
     print(f"Max Upload Size: {MAX_UPLOAD_SIZE_MB} MB")
-    print(f"API Key Status: {'✓ Configured' if ANTHROPIC_API_KEY else '✗ Missing'}")
+    print(f"OpenAI API Key: {'✓ Configured' if OPENAI_API_KEY else '✗ Missing'}")
+    print(f"Tavily API Key: {'✓ Configured' if TAVILY_API_KEY else '✗ Missing'}")
+    print(f"Research Queries: {RESEARCH_QUERIES_COUNT}")
+    print(f"Web Chunk Size: {WEB_CHUNK_SIZE} characters")
     print("=" * 60)
 
 

@@ -18,3 +18,6 @@ torch==2.2.1              # Required by sentence-transformers
 # Utilities
 python-dotenv==1.0.1      # Environment variable management
 chardet==5.2.0            # Encoding detection for text files
+
+# Web Research
+tavily-python==0.3.0      # Tavily AI Search API client
