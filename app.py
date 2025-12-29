@@ -278,8 +278,21 @@ def display_sources(sources: list, use_expanders: bool = True):
         if use_expanders:
             expander_title = f"{icon} Source {idx}: {filename}"
             if is_image:
-                page = metadata.get('page_number', 'unknown')
-                expander_title += f" (Page {page})"
+                # Check if it's from a slide or a page
+                if 'slide_number' in metadata:
+                    slide = metadata.get('slide_number', 'unknown')
+                    expander_title += f" (Slide {slide})"
+                else:
+                    page = metadata.get('page_number', 'unknown')
+                    expander_title += f" (Page {page})"
+            elif 'slide_number' in metadata:
+                # Text from a slide
+                slide = metadata.get('slide_number', 'unknown')
+                slide_title = metadata.get('slide_title', '')
+                if slide_title:
+                    expander_title += f" (Slide {slide}: {slide_title})"
+                else:
+                    expander_title += f" (Slide {slide})"
             expander_title += f" - Similarity: {similarity:.2%}"
 
             with st.expander(expander_title):
@@ -289,7 +302,10 @@ def display_sources(sources: list, use_expanders: bool = True):
 
                 if is_image:
                     # Display image information
-                    st.markdown(f"**Page:** {metadata.get('page_number', 'unknown')}")
+                    if 'slide_number' in metadata:
+                        st.markdown(f"**Slide:** {metadata.get('slide_number', 'unknown')}")
+                    else:
+                        st.markdown(f"**Page:** {metadata.get('page_number', 'unknown')}")
                     st.markdown(f"**Size:** {metadata.get('image_width', '?')}x{metadata.get('image_height', '?')} pixels")
 
                     # Display the image
@@ -990,9 +1006,9 @@ def render_document_qa_mode():
         # File uploader
         uploaded_files = st.file_uploader(
             "Upload documents",
-            type=['pdf', 'docx', 'txt'],
+            type=['pdf', 'docx', 'pptx', 'txt'],
             accept_multiple_files=True,
-            help="Upload PDF, Word documents, or text files"
+            help="Upload PDF, Word, PowerPoint, or text files"
         )
 
         # Process button

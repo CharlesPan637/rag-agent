@@ -270,6 +270,85 @@ IMAGE_DETAIL_LEVEL = os.getenv("IMAGE_DETAIL_LEVEL", "low")
 IMAGE_TEMP_DIR = "./data/temp_images"
 
 # ============================================================================
+# PowerPoint Processing Configuration
+# ============================================================================
+
+# Enable/disable PowerPoint (.pptx) file processing
+#
+# Learning Note - PowerPoint Support:
+# -----------------------------------
+# PowerPoint files contain:
+# - Slide text (titles, body, bullet points)
+# - Embedded images (charts, diagrams, photos)
+# - Speaker notes (presenter comments)
+# - Tables and shapes
+#
+# When enabled, each slide becomes a searchable chunk with full context
+ENABLE_PPTX_PROCESSING = os.getenv("ENABLE_PPTX_PROCESSING", "true").lower() == "true"
+
+# Maximum slides per PowerPoint document
+#
+# Learning Note - Slide Limits:
+# -----------------------------
+# Large presentations can have 100+ slides
+# Processing all slides ensures complete coverage but takes time
+# 100 slides is reasonable for most presentations:
+# - Conference talks: ~20-40 slides
+# - Training materials: ~50-80 slides
+# - Comprehensive decks: ~100-150 slides
+MAX_SLIDES_PER_DOCUMENT = int(os.getenv("MAX_SLIDES_PER_DOCUMENT", "100"))
+
+# Extract and analyze images from slides
+#
+# Learning Note - Slide Images:
+# -----------------------------
+# Slides often contain important visual information:
+# - Charts and graphs showing data trends
+# - Diagrams illustrating processes or architectures
+# - Screenshots demonstrating features
+# - Photos providing context
+#
+# Requires ENABLE_IMAGE_PROCESSING=true
+# Each slide image is analyzed with GPT-4 Vision for searchable descriptions
+EXTRACT_SLIDE_IMAGES = os.getenv("EXTRACT_SLIDE_IMAGES", "true").lower() == "true"
+
+# Include speaker notes in searchable content
+#
+# Learning Note - Speaker Notes Value:
+# ------------------------------------
+# Speaker notes often contain:
+# - Detailed explanations not shown on slides
+# - Additional context and examples
+# - References and citations
+# - Talking points and reminders
+#
+# Including notes makes presentations much more searchable
+INCLUDE_SPEAKER_NOTES = os.getenv("INCLUDE_SPEAKER_NOTES", "true").lower() == "true"
+
+# Chunk size for PowerPoint content
+#
+# Learning Note - PowerPoint Chunking:
+# ------------------------------------
+# Slides are natural chunk boundaries (unlike continuous text)
+# Larger chunks preserve slide context:
+# - Title + body + notes stay together
+# - Related bullet points aren't split
+# - Slide structure is maintained
+#
+# 1000 characters ≈ 1-2 slides worth of content
+PPTX_CHUNK_SIZE = int(os.getenv("PPTX_CHUNK_SIZE", "1000"))
+
+# Preserve slide structure
+#
+# Learning Note - Structure Preservation:
+# ---------------------------------------
+# When True: Each slide's title, body, and notes are kept together
+# When False: Content is split by chunk size regardless of slide boundaries
+#
+# Recommended: True (preserves context and makes results more useful)
+PRESERVE_SLIDE_STRUCTURE = os.getenv("PRESERVE_SLIDE_STRUCTURE", "true").lower() == "true"
+
+# ============================================================================
 # Directory Setup
 # ============================================================================
 

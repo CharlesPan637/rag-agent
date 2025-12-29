@@ -2,9 +2,10 @@
 Document Processing Module for RAG Agent.
 
 This module handles:
-1. Parsing different document formats (PDF, DOCX, TXT)
+1. Parsing different document formats (PDF, DOCX, TXT, PPTX)
 2. Intelligent text chunking with overlap
 3. Metadata attachment for source tracking
+4. Image extraction and analysis
 
 Learning Note:
 Document processing is the first step in the RAG pipeline. Good chunking
@@ -38,6 +39,14 @@ except ImportError:
     IMAGE_PROCESSING_AVAILABLE = False
     print("Image processing modules not available.")
 
+# PowerPoint processing (conditional import)
+try:
+    from modules.pptx_processor import PowerPointProcessor
+    PPTX_PROCESSING_AVAILABLE = True
+except ImportError:
+    PPTX_PROCESSING_AVAILABLE = False
+    print("PowerPoint processing module not available.")
+
 
 class DocumentParser:
     """
@@ -46,6 +55,7 @@ class DocumentParser:
     Supported formats:
     - PDF (.pdf) - using pypdf
     - Microsoft Word (.docx) - using python-docx
+    - Microsoft PowerPoint (.pptx) - using python-pptx
     - Plain text (.txt) - with automatic encoding detection
     """
 
@@ -182,6 +192,79 @@ class DocumentParser:
             raise ValueError(f"Error parsing text file: {str(e)}")
 
     @staticmethod
+    def parse_pptx(file: BinaryIO) -> str:
+        """
+        Extract text from a PowerPoint file.
+
+        Args:
+            file: Binary file object (PPTX)
+
+        Returns:
+            str: Extracted text from all slides
+
+        Learning Note - PowerPoint vs Other Formats:
+        --------------------------------------------
+        PowerPoint files have unique structure:
+        - Slides with titles and body text
+        - Speaker notes (often ignored but valuable!)
+        - Embedded images (need separate extraction)
+        - Tables and charts
+
+        We extract text-only here. Full slide processing with images
+        is handled in process_document() method using PowerPointProcessor.
+
+        This method is used when ENABLE_PPTX_PROCESSING=False or
+        when only text extraction is needed (no slide structure preservation).
+        """
+        try:
+            from pptx import Presentation
+
+            # Load presentation
+            presentation = Presentation(file)
+
+            # Extract text from all slides
+            text_parts = []
+
+            for slide_num, slide in enumerate(presentation.slides, start=1):
+                slide_parts = []
+
+                # Extract title
+                if slide.shapes.title:
+                    title = slide.shapes.title.text.strip()
+                    if title:
+                        slide_parts.append(f"Slide {slide_num}: {title}")
+
+                # Extract body text from all shapes
+                for shape in slide.shapes:
+                    if hasattr(shape, "text") and shape != slide.shapes.title:
+                        text = shape.text.strip()
+                        if text:
+                            slide_parts.append(text)
+
+                # Extract speaker notes if available
+                if slide.has_notes_slide:
+                    notes_slide = slide.notes_slide
+                    if hasattr(notes_slide, 'notes_text_frame'):
+                        notes_text = notes_slide.notes_text_frame.text.strip()
+                        if notes_text:
+                            slide_parts.append(f"Notes: {notes_text}")
+
+                # Combine slide parts
+                if slide_parts:
+                    text_parts.append('\n'.join(slide_parts))
+
+            # Combine all slides
+            full_text = "\n\n".join(text_parts)
+
+            if not full_text.strip():
+                raise ValueError("PowerPoint appears to be empty or contains only images")
+
+            return full_text
+
+        except Exception as e:
+            raise ValueError(f"Error parsing PowerPoint file: {str(e)}")
+
+    @staticmethod
     def parse_document(file: BinaryIO, file_type: str) -> str:
         """
         Route document to appropriate parser based on file type.
@@ -202,6 +285,8 @@ class DocumentParser:
             return DocumentParser.parse_pdf(file)
         elif file_type == '.docx':
             return DocumentParser.parse_docx(file)
+        elif file_type == '.pptx':
+            return DocumentParser.parse_pptx(file)
         elif file_type == '.txt':
             return DocumentParser.parse_txt(file)
         else:
@@ -394,6 +479,11 @@ class TextChunker:
             >>> image_chunks = [c for c in chunks if c.get('type') == 'image']
             >>> print(f"Text: {len(text_chunks)}, Images: {len(image_chunks)}")
         """
+        # Special handling for PowerPoint when full processing is enabled
+        if file_type.lower() == '.pptx' and settings.ENABLE_PPTX_PROCESSING and PPTX_PROCESSING_AVAILABLE:
+            print(f"\nProcessing PowerPoint with full slide structure preservation...")
+            return TextChunker._process_powerpoint_full(file, filename)
+
         # Step 1: Parse document to get text
         file.seek(0)  # Reset file pointer
         text = DocumentParser.parse_document(file, file_type)
@@ -412,7 +502,7 @@ class TextChunker:
         image_chunks = []
         if settings.ENABLE_IMAGE_PROCESSING and IMAGE_PROCESSING_AVAILABLE:
             # Check if file type supports image extraction
-            if file_type.lower() in ['.pdf', '.docx', '.doc']:
+            if file_type.lower() in ['.pdf', '.docx', '.doc', '.pptx']:
                 print(f"\nProcessing images from {filename}...")
 
                 # Save file temporarily for image extraction
@@ -481,3 +571,116 @@ class TextChunker:
         print(f"\nTotal chunks created: {len(all_chunks)} ({len(chunks_with_metadata)} text, {len(image_chunks)} images)")
 
         return all_chunks
+
+    @staticmethod
+    def _process_powerpoint_full(file: BinaryIO, filename: str) -> List[Dict[str, Any]]:
+        """
+        Process PowerPoint with full slide structure preservation.
+
+        Args:
+            file: Binary file object (PPTX)
+            filename: Original filename
+
+        Returns:
+            List of chunks with slide structure and images
+
+        Learning Note - Full PowerPoint Processing:
+        -------------------------------------------
+        This method provides complete PowerPoint processing:
+        1. Extract text from each slide (title, body, notes)
+        2. Preserve slide structure (each slide = one chunk)
+        3. Extract and analyze images from slides
+        4. Create rich metadata (slide numbers, titles, etc.)
+
+        This is different from generic text extraction because:
+        - Slides are natural chunk boundaries
+        - Slide numbers and titles provide context
+        - Speaker notes add valuable information
+        - Slide images are part of the content
+        """
+        try:
+            # Save file temporarily for processing
+            temp_file = None
+            try:
+                # Create temporary file
+                file.seek(0)
+                with tempfile.NamedTemporaryFile(
+                    delete=False,
+                    suffix='.pptx',
+                    dir=settings.IMAGE_TEMP_DIR
+                ) as temp_file:
+                    shutil.copyfileobj(file, temp_file)
+                    temp_path = temp_file.name
+
+                # Process PowerPoint
+                pptx_processor = PowerPointProcessor()
+                presentation_data = pptx_processor.process_presentation(temp_path)
+
+                if 'error' in presentation_data:
+                    raise ValueError(presentation_data['error'])
+
+                # Create slide chunks
+                slide_chunks = pptx_processor.create_slide_chunks(
+                    presentation_data['slides'],
+                    filename
+                )
+
+                # Process slide images if enabled
+                image_chunks = []
+                if settings.EXTRACT_SLIDE_IMAGES and IMAGE_PROCESSING_AVAILABLE:
+                    print(f"\nAnalyzing {presentation_data['images_extracted']} slide images...")
+
+                    # Collect all images from all slides
+                    all_images = []
+                    for slide in presentation_data['slides']:
+                        all_images.extend(slide['images'])
+
+                    if all_images:
+                        # Analyze with vision processor
+                        vision_processor = VisionProcessor()
+                        analyzed_images = vision_processor.process_images_batch(all_images)
+
+                        # Create image chunks
+                        for img in analyzed_images:
+                            image_chunk = {
+                                'text': f"[IMAGE from Slide {img['slide_number']}] {img['description']}",
+                                'type': 'image',
+                                'image_data': img['image_data'],
+                                'metadata': {
+                                    'source': filename,
+                                    'chunk_type': 'image',
+                                    'source_type': 'pptx_slide',
+                                    'slide_number': img['slide_number'],
+                                    'image_width': img['width'],
+                                    'image_height': img['height'],
+                                    'image_index': img.get('image_index', 0),
+                                    'vision_model': img.get('vision_model', settings.VISION_MODEL)
+                                }
+                            }
+                            image_chunks.append(image_chunk)
+
+                        print(f"Created {len(image_chunks)} image chunks from slides")
+
+                # Combine slide and image chunks
+                all_chunks = slide_chunks + image_chunks
+
+                print(f"\nTotal PowerPoint chunks: {len(all_chunks)} ({len(slide_chunks)} slides, {len(image_chunks)} images)")
+
+                return all_chunks
+
+            finally:
+                # Clean up temporary file
+                if temp_file and Path(temp_path).exists():
+                    try:
+                        Path(temp_path).unlink()
+                    except Exception as e:
+                        print(f"Could not delete temp file: {e}")
+
+        except Exception as e:
+            print(f"Error in full PowerPoint processing: {e}")
+            # Fallback to basic text extraction
+            print("Falling back to basic text extraction...")
+            file.seek(0)
+            text = DocumentParser.parse_pptx(file)
+            chunks = TextChunker.chunk_by_sentences(text)
+            return TextChunker.add_metadata(chunks, filename, '.pptx')
