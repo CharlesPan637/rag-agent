@@ -196,6 +196,80 @@ WEB_CHUNK_SIZE = int(os.getenv("WEB_CHUNK_SIZE", "800"))
 WEB_CHUNK_OVERLAP = int(os.getenv("WEB_CHUNK_OVERLAP", "150"))
 
 # ============================================================================
+# Vision Processing Configuration
+# ============================================================================
+
+# Enable/disable image processing
+#
+# Learning Note - Why Make Image Processing Optional?
+# ---------------------------------------------------
+# Image processing with GPT-4 Vision adds costs:
+# - ~$0.01-0.03 per image depending on detail level
+# - A 20-page PDF with 10 images costs $0.10-0.30
+# - Users should be able to disable this if not needed
+#
+# When disabled: Only text is processed (current behavior)
+# When enabled: Images are extracted, analyzed, and stored with descriptions
+ENABLE_IMAGE_PROCESSING = os.getenv("ENABLE_IMAGE_PROCESSING", "true").lower() == "true"
+
+# Vision model for image analysis
+#
+# Learning Note - Vision Model Options:
+# ------------------------------------
+# gpt-4-vision-preview: Original vision model
+# gpt-4o: Faster, cheaper, better quality (RECOMMENDED)
+# gpt-4o-mini: Even cheaper but lower quality
+#
+# Pricing (as of 2024):
+# - gpt-4o: $0.01/image (low detail) or $0.03/image (high detail)
+# - gpt-4o-mini: $0.003/image (low detail) or $0.009/image (high detail)
+VISION_MODEL = os.getenv("VISION_MODEL", "gpt-4o")
+
+# Maximum images per document (cost control)
+#
+# Learning Note - Cost Management:
+# -------------------------------
+# Without limits, a large document could process hundreds of images
+# Examples with MAX_IMAGES_PER_DOCUMENT=20:
+# - 50-page technical manual with 100 images → only first 20 processed
+# - Research paper with 5 charts → all 5 processed
+# - Cost capped at: 20 images × $0.01 = $0.20 per document
+MAX_IMAGES_PER_DOCUMENT = int(os.getenv("MAX_IMAGES_PER_DOCUMENT", "20"))
+
+# Minimum image size to process
+#
+# Learning Note - Why Skip Small Images?
+# --------------------------------------
+# Many documents have tiny images:
+# - Icons (16x16, 32x32)
+# - Bullets and decorations
+# - Logos and watermarks
+# These rarely contain useful information but cost money to process
+# 100x100 is a good threshold to filter out decorative elements
+MIN_IMAGE_WIDTH = 100
+MIN_IMAGE_HEIGHT = 100
+
+# Parse MIN_IMAGE_SIZE from env (format: WIDTHxHEIGHT)
+min_image_size = os.getenv("MIN_IMAGE_SIZE", "100x100")
+if "x" in min_image_size:
+    width, height = min_image_size.split("x")
+    MIN_IMAGE_WIDTH = int(width)
+    MIN_IMAGE_HEIGHT = int(height)
+
+# Image detail level for vision API
+#
+# Learning Note - Detail Levels:
+# -----------------------------
+# low: Faster, cheaper ($0.01), good for most images
+# high: More detailed analysis ($0.03), better for complex diagrams
+#
+# Use "low" unless you need to read very small text or analyze complex details
+IMAGE_DETAIL_LEVEL = os.getenv("IMAGE_DETAIL_LEVEL", "low")
+
+# Directory for temporary image storage
+IMAGE_TEMP_DIR = "./data/temp_images"
+
+# ============================================================================
 # Directory Setup
 # ============================================================================
 
@@ -212,6 +286,7 @@ def ensure_directories():
         PROJECT_ROOT / "data",
         PROJECT_ROOT / "data" / "uploads",
         CHROMA_PERSIST_DIRECTORY,
+        IMAGE_TEMP_DIR,
     ]
 
     for directory in directories:

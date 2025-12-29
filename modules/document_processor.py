@@ -18,6 +18,8 @@ import re
 from datetime import datetime
 from typing import List, Dict, Any, BinaryIO
 from pathlib import Path
+import tempfile
+import shutil
 
 # Document parsing libraries
 import pypdf
@@ -26,6 +28,15 @@ import chardet
 
 # Configuration
 from config import settings
+
+# Image processing (conditional import)
+try:
+    from modules.image_extractor import ImageExtractor
+    from modules.vision_processor import VisionProcessor
+    IMAGE_PROCESSING_AVAILABLE = True
+except ImportError:
+    IMAGE_PROCESSING_AVAILABLE = False
+    print("Image processing modules not available.")
 
 
 class DocumentParser:
@@ -341,7 +352,7 @@ class TextChunker:
         file_type: str
     ) -> List[Dict[str, Any]]:
         """
-        Complete pipeline: Parse document, chunk text, add metadata.
+        Complete pipeline: Parse document, chunk text, add metadata, process images.
 
         Args:
             file: Binary file object
@@ -349,21 +360,42 @@ class TextChunker:
             file_type: File extension
 
         Returns:
-            List of chunks with metadata
+            List of chunks with metadata (includes both text and image chunks)
 
         This is the main entry point for document processing.
         It orchestrates the entire pipeline:
         1. Parse document to extract text
         2. Chunk text intelligently
-        3. Add metadata for tracking
+        3. Extract and analyze images (if enabled)
+        4. Add metadata for tracking
+        5. Combine text and image chunks
+
+        Learning Note - Image Processing Flow:
+        -------------------------------------
+        When image processing is enabled:
+        1. Save uploaded file temporarily (image extraction needs file path)
+        2. Extract images from document
+        3. Analyze each image with GPT-4 Vision
+        4. Create special "image chunks" with descriptions
+        5. Clean up temporary file
+        6. Combine text chunks and image chunks
+
+        Image chunks have:
+        - type: 'image'
+        - text: Image description from vision model
+        - image_data: Base64 encoded image
+        - metadata: Image info (size, page, etc.)
 
         Example:
             >>> with open('document.pdf', 'rb') as f:
             >>>     chunks = TextChunker.process_document(f, 'document.pdf', '.pdf')
             >>> print(f"Created {len(chunks)} chunks")
-            >>> print(f"First chunk: {chunks[0]['text'][:100]}...")
+            >>> text_chunks = [c for c in chunks if c.get('type') != 'image']
+            >>> image_chunks = [c for c in chunks if c.get('type') == 'image']
+            >>> print(f"Text: {len(text_chunks)}, Images: {len(image_chunks)}")
         """
         # Step 1: Parse document to get text
+        file.seek(0)  # Reset file pointer
         text = DocumentParser.parse_document(file, file_type)
 
         # Step 2: Chunk the text
@@ -376,4 +408,76 @@ class TextChunker:
             file_type
         )
 
-        return chunks_with_metadata
+        # Step 4: Process images (if enabled and supported)
+        image_chunks = []
+        if settings.ENABLE_IMAGE_PROCESSING and IMAGE_PROCESSING_AVAILABLE:
+            # Check if file type supports image extraction
+            if file_type.lower() in ['.pdf', '.docx', '.doc']:
+                print(f"\nProcessing images from {filename}...")
+
+                # Save file temporarily for image extraction
+                temp_file = None
+                try:
+                    # Create temporary file
+                    file.seek(0)  # Reset file pointer
+                    with tempfile.NamedTemporaryFile(
+                        delete=False,
+                        suffix=file_type,
+                        dir=settings.IMAGE_TEMP_DIR
+                    ) as temp_file:
+                        # Copy uploaded file to temporary file
+                        shutil.copyfileobj(file, temp_file)
+                        temp_path = temp_file.name
+
+                    # Extract images
+                    extractor = ImageExtractor()
+                    images = extractor.extract_images(temp_path, file_type.lstrip('.'))
+
+                    if images:
+                        print(f"Found {len(images)} images")
+
+                        # Analyze images with vision model
+                        processor = VisionProcessor()
+                        analyzed_images = processor.process_images_batch(images, show_progress=True)
+
+                        # Create chunks for images
+                        for img in analyzed_images:
+                            image_chunk = {
+                                'text': f"[IMAGE] {img['description']}",
+                                'type': 'image',
+                                'image_data': img['image_data'],
+                                'image_format': img['format'],
+                                'metadata': {
+                                    'filename': filename,
+                                    'file_type': file_type,
+                                    'upload_date': datetime.now().isoformat(),
+                                    'chunk_type': 'image',
+                                    'image_width': img['width'],
+                                    'image_height': img['height'],
+                                    'image_source': img['source_type'],
+                                    'vision_model': img.get('vision_model', settings.VISION_MODEL),
+                                    'page_number': img.get('page_number', 'unknown')
+                                }
+                            }
+                            image_chunks.append(image_chunk)
+
+                        print(f"Created {len(image_chunks)} image chunks")
+                    else:
+                        print("No images found in document")
+
+                except Exception as e:
+                    print(f"Error processing images: {e}")
+                finally:
+                    # Clean up temporary file
+                    if temp_file and Path(temp_path).exists():
+                        try:
+                            Path(temp_path).unlink()
+                        except Exception as e:
+                            print(f"Could not delete temp file: {e}")
+
+        # Step 5: Combine text and image chunks
+        all_chunks = chunks_with_metadata + image_chunks
+
+        print(f"\nTotal chunks created: {len(all_chunks)} ({len(chunks_with_metadata)} text, {len(image_chunks)} images)")
+
+        return all_chunks

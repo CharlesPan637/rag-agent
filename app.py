@@ -32,6 +32,7 @@ from typing import Dict, List, Any
 from docx import Document
 from docx.shared import Pt, RGBColor, Inches
 from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
+from openai import OpenAI
 
 # Import our modules
 from config import settings
@@ -49,6 +50,9 @@ from utils.helpers import (
 from modules.web_searcher import TavilySearcher
 from modules.web_content_processor import WebContentChunker
 from modules.research_agent import ResearchAgent
+
+# Initialize OpenAI client for chat functions
+client = OpenAI(api_key=settings.OPENAI_API_KEY)
 
 
 # ============================================================================
@@ -161,7 +165,9 @@ def initialize_session_state():
         st.session_state.research_chat_messages = []
         st.session_state.research_chat_enabled = None  # None = no mode selected yet
         st.session_state.awaiting_clarification = False
+        st.session_state.awaiting_confirmation = False  # Waiting for user to confirm research
         st.session_state.pending_topic = None
+        st.session_state.pending_search_params = None  # Store search parameters for confirmation
 
 
 # ============================================================================
@@ -241,6 +247,15 @@ def display_sources(sources: list, use_expanders: bool = True):
     Args:
         sources: List of retrieved chunks with metadata
         use_expanders: Whether to use expanders for each source (set False if already in expander)
+
+    Learning Note - Image Display:
+    -----------------------------
+    Sources can now include images! When a source is an image chunk:
+    - Display the actual image
+    - Show the vision model's description
+    - Include metadata (size, page number, etc.)
+
+    This allows users to see visual content from their documents.
     """
     if not sources:
         return
@@ -251,21 +266,85 @@ def display_sources(sources: list, use_expanders: bool = True):
         metadata = source['metadata']
         filename = metadata.get('filename', 'Unknown')
         distance = source.get('distance', 0)
+        chunk_type = metadata.get('chunk_type', 'text')
 
         # Calculate similarity score (0-1, higher is better)
         similarity = 1 / (1 + distance)
 
+        # Check if this is an image chunk
+        is_image = chunk_type == 'image'
+        icon = "🖼️" if is_image else "📄"
+
         if use_expanders:
-            with st.expander(f"Source {idx}: {filename} - Similarity: {similarity:.2%}"):
+            expander_title = f"{icon} Source {idx}: {filename}"
+            if is_image:
+                page = metadata.get('page_number', 'unknown')
+                expander_title += f" (Page {page})"
+            expander_title += f" - Similarity: {similarity:.2%}"
+
+            with st.expander(expander_title):
                 st.markdown(f"**File:** {filename}")
+                st.markdown(f"**Type:** {'Image' if is_image else 'Text'}")
                 st.markdown(f"**Relevance Score:** {similarity:.2%}")
-                st.markdown("**Content:**")
-                st.text(source['text'])
+
+                if is_image:
+                    # Display image information
+                    st.markdown(f"**Page:** {metadata.get('page_number', 'unknown')}")
+                    st.markdown(f"**Size:** {metadata.get('image_width', '?')}x{metadata.get('image_height', '?')} pixels")
+
+                    # Display the image
+                    if 'image_data' in metadata:
+                        try:
+                            import base64
+                            from PIL import Image as PILImage
+                            from io import BytesIO
+
+                            # Decode base64 image
+                            image_bytes = base64.b64decode(metadata['image_data'])
+                            image = PILImage.open(BytesIO(image_bytes))
+
+                            st.image(image, caption=f"Image from {filename}", use_container_width=True)
+                        except Exception as e:
+                            st.error(f"Could not display image: {e}")
+
+                    # Show description
+                    st.markdown("**Description:**")
+                    # Remove [IMAGE] prefix if present
+                    description = source['text'].replace('[IMAGE] ', '')
+                    st.markdown(description)
+                else:
+                    # Display text content
+                    st.markdown("**Content:**")
+                    st.text(source['text'])
         else:
             # Display without expander (for when already inside an expander)
-            st.markdown(f"**Source {idx}: {filename}**")
+            st.markdown(f"{icon} **Source {idx}: {filename}**")
+            st.markdown(f"- Type: {'Image' if is_image else 'Text'}")
             st.markdown(f"- Relevance Score: {similarity:.2%}")
-            st.markdown(f"- Content Preview: {source['text'][:200]}...")
+
+            if is_image:
+                st.markdown(f"- Page: {metadata.get('page_number', 'unknown')}")
+                # Show thumbnail for image
+                if 'image_data' in metadata:
+                    try:
+                        import base64
+                        from PIL import Image as PILImage
+                        from io import BytesIO
+
+                        image_bytes = base64.b64decode(metadata['image_data'])
+                        image = PILImage.open(BytesIO(image_bytes))
+
+                        # Create thumbnail
+                        image.thumbnail((200, 200))
+                        st.image(image, width=200)
+                    except:
+                        pass
+
+                description = source['text'].replace('[IMAGE] ', '')
+                st.markdown(f"- Description: {description[:200]}...")
+            else:
+                st.markdown(f"- Content Preview: {source['text'][:200]}...")
+
             st.markdown("---")
 
 
@@ -442,6 +521,98 @@ def add_hyperlink(paragraph, url, text):
 # Chat Agent Helper Functions
 # ============================================================================
 
+def quick_conversational_check(message: str) -> Dict[str, Any]:
+    """
+    Fast pattern-based check for common conversational queries.
+    Returns response immediately without API call for common questions.
+
+    Learning Note - Performance Optimization:
+    ----------------------------------------
+    API calls take 1-2 seconds. For common questions, we can skip the API
+    entirely and respond instantly using pattern matching.
+
+    This function handles:
+    - Capability questions ("what can you do", "how do you work")
+    - Greetings ("hi", "hello", "thanks")
+    - Simple yes/no questions about features
+
+    Only uses API for complex/ambiguous queries.
+    """
+    msg_lower = message.lower().strip()
+
+    # Greeting patterns
+    greeting_patterns = ['hi', 'hello', 'hey', 'greetings', 'good morning', 'good afternoon', 'good evening']
+    if any(msg_lower.startswith(pattern) for pattern in greeting_patterns):
+        return {
+            'type': 'quick_response',
+            'response': "Hello! I'm your research assistant. I can search the web and synthesize information on any topic you'd like to explore. What would you like me to research for you?"
+        }
+
+    # Thank you patterns
+    thanks_patterns = ['thanks', 'thank you', 'thx', 'appreciate it', 'perfect', 'great', 'awesome', 'excellent']
+    if any(pattern in msg_lower for pattern in thanks_patterns) and len(msg_lower.split()) <= 5:
+        return {
+            'type': 'quick_response',
+            'response': "You're welcome! Let me know if you'd like to research anything else."
+        }
+
+    # Capability questions
+    if any(pattern in msg_lower for pattern in ['what can you do', 'what do you do', 'your capabilities', 'what are you capable of']):
+        return {
+            'type': 'quick_response',
+            'response': """I'm a web research assistant! Here's what I can do:
+
+• **Research any topic** - I search multiple web sources (articles, blogs, news, social media)
+• **Synthesize findings** - I analyze and combine information from different sources
+• **Provide citations** - Every fact is backed by source URLs
+• **Answer follow-ups** - Ask me questions about the research I've conducted
+
+I use Tavily AI to search the web and OpenAI GPT to synthesize findings. Just tell me what topic you'd like me to research!"""
+        }
+
+    # YouTube capability questions only (not actual research requests)
+    # Only match if asking about capability WITHOUT specifying a topic
+    if 'youtube' in msg_lower and not any(topic_word in msg_lower for topic_word in ['about', 'on', 'topic', 'channel', 'video', 'tutorial', 'coding', 'programming']):
+        if any(word in msg_lower for word in ['can you search youtube', 'do you search youtube', 'know how to search youtube']):
+            return {
+                'type': 'quick_response',
+                'response': "Yes! I can search for information **about** YouTube topics and content. I search web sources (articles, blogs, discussions) that talk about YouTube videos, trends, and creators. I don't search YouTube's video database directly, but I can find web content that discusses YouTube topics. What would you like me to research?"
+            }
+
+    # How does it work questions
+    if any(pattern in msg_lower for pattern in ['how do you work', 'how does this work', 'how does it work', 'explain how']):
+        return {
+            'type': 'quick_response',
+            'response': """Here's how I work:
+
+1. **You give me a topic** - Tell me what you want to research
+2. **I search the web** - I use Tavily AI to search multiple sources
+3. **I analyze results** - I process 15-20 sources on your topic
+4. **I synthesize a report** - I combine findings into a clear, cited report
+5. **You can ask follow-ups** - Ask me to clarify or dive deeper
+
+The whole process takes 20-30 seconds. Want to try it? Give me a topic!"""
+        }
+
+    # Cost questions
+    if any(pattern in msg_lower for pattern in ['how much', 'cost', 'price', 'expensive']):
+        return {
+            'type': 'quick_response',
+            'response': "Each research session costs approximately $0.05-0.06 (about 5 cents). This includes searching multiple sources and AI synthesis. It's very affordable for comprehensive research! What would you like me to research?"
+        }
+
+    # Subscriber/metrics/analytics questions
+    if any(pattern in msg_lower for pattern in ['subscriber', 'subscription', 'view count', 'views', 'analytics', 'metrics', 'statistics', 'follower']):
+        if any(word in msg_lower for word in ['see', 'can you', 'do you', 'show', 'get', 'find']):
+            return {
+                'type': 'quick_response',
+                'response': "No, I can't see subscriber counts, view counts, or live metrics directly from platforms. However, I can search for web articles that may mention this information about specific channels or topics."
+            }
+
+    # Not a quick response - needs API processing
+    return {'type': 'needs_api'}
+
+
 def check_topic_ambiguity(topic: str) -> Dict[str, Any]:
     """
     Check if a research topic needs clarification using GPT.
@@ -507,14 +678,15 @@ Examples:
 Respond ONLY with valid JSON, no other text."""
 
         # Call OpenAI API
-        response = client.chat.completions.create(
-            model=settings.LLM_MODEL,
+        llm_client = OpenAI(api_key=settings.OPENAI_API_KEY)
+        response = llm_client.chat.completions.create(
+            model="gpt-3.5-turbo",  # Use faster model for ambiguity detection
             messages=[
                 {"role": "system", "content": "You are a helpful research assistant that detects ambiguous topics."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.3,  # Lower temperature for more consistent analysis
-            max_tokens=500
+            temperature=0.0,  # Deterministic for consistent analysis
+            max_tokens=400
         )
 
         # Parse response
@@ -548,6 +720,121 @@ Respond ONLY with valid JSON, no other text."""
             'is_ambiguous': False,
             'reasoning': f'Error during analysis: {str(e)}',
             'clarification_questions': []
+        }
+
+
+def detect_research_intent(message: str) -> Dict[str, Any]:
+    """
+    Detect if a message is requesting research or just conversational.
+
+    Learning Note - Intent Detection:
+    --------------------------------
+    Not every message should trigger research!
+    - "What can you do?" → Conversational
+    - "Do you know about X?" → Conversational
+    - "Research quantum computing" → Research request
+    - "Tell me about AI" → Could be either (ambiguous)
+
+    This function uses GPT to understand user intent.
+    """
+    try:
+        # Quick keyword check for obvious research requests
+        msg_lower = message.lower().strip()
+        research_keywords = [
+            'research', 'find information', 'search for', 'look up',
+            'tell me about', 'what are', 'what is', 'how to',
+            'tutorial', 'guide', 'learn about', 'popular', 'best',
+            'latest', 'channels on', 'about', 'information on'
+        ]
+
+        # If message contains research keywords and is longer than 2 words, likely research
+        if any(keyword in msg_lower for keyword in research_keywords) and len(message.split()) >= 2:
+            # But exclude pure capability questions
+            if not any(cap in msg_lower for cap in ['what can you', 'how do you work', 'how does this work']):
+                return {
+                    'intent': 'research_request',
+                    'confidence': 0.9,
+                    'reasoning': 'Contains research keywords'
+                }
+
+        # If message is 1-3 words and not a greeting/thanks, likely a topic name
+        word_count = len(message.split())
+        if word_count <= 3 and word_count >= 1:
+            if not any(casual in msg_lower for casual in ['hi', 'hello', 'hey', 'thanks', 'thank', 'yes', 'no', 'ok', 'sure']):
+                return {
+                    'intent': 'research_request',
+                    'confidence': 0.85,
+                    'reasoning': 'Short topic name'
+                }
+        prompt = f"""Analyze this user message and determine their intent.
+
+User message: "{message}"
+
+Is the user:
+A) Asking a conversational question about capabilities, features, or how things work?
+   Examples: "What can you do?", "How does this work?", "Can you help me?"
+
+B) Making a greeting or casual conversation?
+   Examples: "Hello", "Thanks", "That's helpful"
+
+C) Requesting actual research on a topic?
+   Examples:
+   - "Research quantum computing"
+   - "Find information about AI in healthcare"
+   - "vibe coding" (a topic to research)
+   - "tutorial on how to vibe code"
+   - "popular YouTube channels on [topic]"
+   - "search for [topic]"
+   - Any topic/subject name they want researched
+
+IMPORTANT: If the message mentions a specific TOPIC or SUBJECT (like "vibe coding", "AI agents", "Python tutorials"),
+it's almost certainly a research request, NOT conversational.
+
+Respond in JSON format:
+{{
+    "intent": "conversational" or "research_request",
+    "confidence": 0.0-1.0,
+    "reasoning": "brief explanation"
+}}
+
+If unclear, prefer "research_request" over "conversational" - it's better to ask for confirmation than to ignore a research request."""
+
+        llm_client = OpenAI(api_key=settings.OPENAI_API_KEY)
+        response = llm_client.chat.completions.create(
+            model="gpt-3.5-turbo",  # Use faster, cheaper model for intent detection
+            messages=[
+                {"role": "system", "content": "You are an intent detection system."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.0,  # Deterministic for consistent intent detection
+            max_tokens=150
+        )
+
+        # Parse response
+        import json
+        import re
+        response_text = response.choices[0].message.content.strip()
+
+        # Extract JSON
+        json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', response_text, re.DOTALL)
+        if json_match:
+            response_text = json_match.group(1)
+
+        result = json.loads(response_text)
+
+        return {
+            'intent': result.get('intent', 'conversational'),
+            'confidence': result.get('confidence', 0.5),
+            'reasoning': result.get('reasoning', '')
+        }
+
+    except Exception as e:
+        print(f"Error detecting intent: {e}")
+        # Default to conversational on error
+        return {
+            'intent': 'conversational',
+            'confidence': 0.5,
+            'reasoning': 'Error during detection'
         }
 
 
@@ -615,8 +902,9 @@ Instructions:
 Respond naturally to the user's message:"""
 
         # Call OpenAI API
-        response = client.chat.completions.create(
-            model=settings.LLM_MODEL,
+        llm_client = OpenAI(api_key=settings.OPENAI_API_KEY)
+        response = llm_client.chat.completions.create(
+            model=settings.OPENAI_MODEL,
             messages=[
                 {"role": "system", "content": "You are a helpful research assistant."},
                 {"role": "user", "content": prompt}
@@ -970,175 +1258,279 @@ def render_research_chat_interface():
         # Process the message
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
-                # Check if we're awaiting clarification
-                if st.session_state.awaiting_clarification:
-                    # User provided clarification, use it to refine the pending topic
-                    refined_topic = f"{st.session_state.pending_topic} - {prompt}"
-                    st.session_state.awaiting_clarification = False
-                    st.session_state.pending_topic = None
+                # Check if we're awaiting confirmation to start research
+                if st.session_state.awaiting_confirmation:
+                    # User responded to confirmation request
+                    # Check if they confirmed (yes, proceed, go ahead, etc.) or declined (no, cancel, etc.)
+                    confirmation_check = prompt.lower().strip()
 
-                    # Now conduct research with the refined topic
-                    st.markdown(f"Great! I'll research: **{refined_topic}**")
-                    st.session_state.research_chat_messages.append({
-                        "role": "assistant",
-                        "content": f"Great! I'll research: **{refined_topic}**"
-                    })
+                    # Simple confirmation detection
+                    if any(word in confirmation_check for word in ['yes', 'yeah', 'sure', 'ok', 'okay', 'go ahead', 'proceed', 'start', 'please', 'yep', 'confirm']):
+                        # User confirmed - proceed with research
+                        st.session_state.awaiting_confirmation = False
+                        topic = st.session_state.pending_topic
+                        search_params = st.session_state.pending_search_params or {}
 
-                    # Conduct research (similar to direct mode but triggered from chat)
-                    try:
-                        progress_placeholder = st.empty()
-                        progress_placeholder.text("Starting research...")
-
-                        # Use fixed collection name for all web research
-                        research_vector_store = ChromaDBStore()
-                        research_vector_store.set_collection(settings.RESEARCH_COLLECTION_NAME)
-                        research_agent = ResearchAgent(research_vector_store, search_depth="basic")
-
-                        # Conduct research with default settings
-                        result = research_agent.conduct_research(
-                            topic=refined_topic,
-                            num_queries=4,
-                            progress_callback=lambda msg, pct: progress_placeholder.text(msg)
-                        )
-
-                        progress_placeholder.empty()
-
-                        # Store in session state
-                        research_record = {
-                            'topic': refined_topic,
-                            'report': result['report'],
-                            'sources': result['sources'],
-                            'timestamp': datetime.now().isoformat(),
-                            'num_sources': len(result['sources']),
-                            'num_chunks': result['num_chunks'],
-                            'search_quality': result['search_quality']
-                        }
-
-                        st.session_state.current_research = research_record
-                        st.session_state.research_history.insert(0, research_record)
-
-                        # Show success message in chat
-                        success_msg = f"✅ Research complete! I found {len(result['sources'])} sources. Check below for the full report!"
-                        st.markdown(success_msg)
+                        confirm_msg = f"Great! Starting research on: **{topic}**"
+                        st.markdown(confirm_msg)
                         st.session_state.research_chat_messages.append({
                             "role": "assistant",
-                            "content": success_msg
+                            "content": confirm_msg
                         })
 
-                        st.rerun()
+                        # Conduct research
+                        try:
+                            progress_placeholder = st.empty()
+                            progress_placeholder.text("Starting research...")
 
-                    except Exception as e:
-                        error_msg = f"❌ Research failed: {str(e)}"
-                        st.markdown(error_msg)
+                            research_vector_store = ChromaDBStore()
+                            research_vector_store.set_collection(settings.RESEARCH_COLLECTION_NAME)
+                            research_agent = ResearchAgent(
+                                research_vector_store,
+                                search_depth=search_params.get('depth', 'basic')
+                            )
+
+                            result = research_agent.conduct_research(
+                                topic=topic,
+                                num_queries=search_params.get('num_queries', 4),
+                                progress_callback=lambda msg, pct: progress_placeholder.text(msg)
+                            )
+
+                            progress_placeholder.empty()
+
+                            research_record = {
+                                'topic': topic,
+                                'report': result['report'],
+                                'sources': result['sources'],
+                                'timestamp': datetime.now().isoformat(),
+                                'num_sources': len(result['sources']),
+                                'num_chunks': result['num_chunks'],
+                                'search_quality': result['search_quality']
+                            }
+
+                            st.session_state.current_research = research_record
+                            st.session_state.research_history.insert(0, research_record)
+                            st.session_state.pending_topic = None
+                            st.session_state.pending_search_params = None
+
+                            success_msg = f"✅ Research complete! I found {len(result['sources'])} sources. Check below for the full report!"
+                            st.markdown(success_msg)
+                            st.session_state.research_chat_messages.append({
+                                "role": "assistant",
+                                "content": success_msg
+                            })
+
+                            st.rerun()
+
+                        except Exception as e:
+                            error_msg = f"❌ Research failed: {str(e)}"
+                            st.markdown(error_msg)
+                            st.session_state.research_chat_messages.append({
+                                "role": "assistant",
+                                "content": error_msg
+                            })
+                            st.session_state.awaiting_confirmation = False
+                            st.session_state.pending_topic = None
+                            st.session_state.pending_search_params = None
+
+                    elif any(word in confirmation_check for word in ['no', 'nope', 'cancel', 'stop', 'don\'t', 'nevermind', 'never mind']):
+                        # User declined
+                        st.session_state.awaiting_confirmation = False
+                        st.session_state.pending_topic = None
+                        st.session_state.pending_search_params = None
+
+                        decline_msg = "No problem! Let me know if you'd like to research something else or if you have any questions."
+                        st.markdown(decline_msg)
                         st.session_state.research_chat_messages.append({
                             "role": "assistant",
-                            "content": error_msg
-                        })
-
-                else:
-                    # Check if this is a follow-up question about existing research
-                    if st.session_state.current_research and not any(
-                        keyword in prompt.lower()
-                        for keyword in ['research', 'study', 'investigate', 'find out about', 'tell me about']
-                    ):
-                        # This looks like a follow-up question about current research
-                        response = generate_chat_response(
-                            prompt,
-                            research_context=st.session_state.current_research
-                        )
-                        st.markdown(response)
-                        st.session_state.research_chat_messages.append({
-                            "role": "assistant",
-                            "content": response
+                            "content": decline_msg
                         })
                         st.rerun()
 
                     else:
-                        # This is a new research topic - check for ambiguity
-                        ambiguity_result = check_topic_ambiguity(prompt)
+                        # Unclear response - ask again
+                        clarify_msg = "I'm not sure if you want me to proceed with the research. Could you please confirm with 'yes' or 'no'?"
+                        st.markdown(clarify_msg)
+                        st.session_state.research_chat_messages.append({
+                            "role": "assistant",
+                            "content": clarify_msg
+                        })
+                        st.rerun()
 
-                        if ambiguity_result['is_ambiguous']:
-                            # Topic is ambiguous - ask for clarification
-                            clarification_msg = f"""I'd be happy to research that, but I need some clarification first:
+                # Check if we're awaiting clarification
+                elif st.session_state.awaiting_clarification:
+                    # User provided clarification, use it to refine the pending topic
+                    refined_topic = f"{st.session_state.pending_topic} - {prompt}"
+                    st.session_state.awaiting_clarification = False
+
+                    # Ask for confirmation before starting research
+                    confirm_msg = f"""Perfect! I understand you want to research: **{refined_topic}**
+
+I'll search multiple web sources and synthesize the findings into a comprehensive report.
+
+**Search parameters:**
+- Search depth: Basic (faster)
+- Number of queries: 4
+- Estimated time: 20-30 seconds
+
+Would you like me to proceed with this research? (yes/no)"""
+
+                    st.markdown(confirm_msg)
+                    st.session_state.research_chat_messages.append({
+                        "role": "assistant",
+                        "content": confirm_msg
+                    })
+
+                    # Mark that we're awaiting confirmation
+                    st.session_state.awaiting_confirmation = True
+                    st.session_state.pending_topic = refined_topic
+                    st.session_state.pending_search_params = {'depth': 'basic', 'num_queries': 4}
+                    st.rerun()
+
+                else:
+                    # Step 0: Quick check for common conversational queries (instant response)
+                    quick_check = quick_conversational_check(prompt)
+
+                    if quick_check['type'] == 'quick_response':
+                        # Instant response without API call!
+                        quick_response = quick_check['response']
+                        st.markdown(quick_response)
+                        st.session_state.research_chat_messages.append({
+                            "role": "assistant",
+                            "content": quick_response
+                        })
+                        st.rerun()
+
+                    # Step 1: Detect user intent (uses fast gpt-3.5-turbo)
+                    intent_result = detect_research_intent(prompt)
+
+                    if intent_result['intent'] == 'conversational':
+                        # User is asking a conversational question or greeting
+                        # Respond conversationally without triggering research
+                        conversational_prompt = f"""You are a helpful research assistant in chat mode.
+
+The user said: "{prompt}"
+
+This is a conversational question about your capabilities, not a research request.
+
+IMPORTANT INSTRUCTIONS:
+- Answer the specific question directly and honestly
+- If asking about a feature you DON'T have, say "No" clearly
+- If asking about a feature you DO have, say "Yes" and briefly explain
+- Be concise (1-2 sentences maximum)
+- Don't give generic capability overviews unless asked "what can you do"
+
+What you CAN do:
+- Search the web for information on any topic (using Tavily AI)
+- Find information from websites, blogs, news, social media
+- Synthesize findings into reports with source citations
+- Answer follow-up questions about research
+
+What you CANNOT do:
+- See subscriber counts, view counts, or live metrics from platforms
+- Access real-time analytics or statistics directly
+- Search YouTube's video database directly (only find web articles about YouTube topics)
+- Access content behind paywalls or login walls
+- See private or restricted information
+
+Example responses:
+- "Can you see subscriber counts?" → "No, I can't see subscriber counts or live metrics. I search web articles that may mention this information."
+- "Can you search YouTube?" → "I can search for information about YouTube topics from web sources, but I don't search YouTube's video database directly."
+- "What can you do?" → "I'm a web research assistant. I search the web for information on any topic and synthesize findings into comprehensive reports."
+"""
+
+                        llm_client = OpenAI(api_key=settings.OPENAI_API_KEY)
+                        response = llm_client.chat.completions.create(
+                            model="gpt-3.5-turbo",  # Use faster model for simple conversational responses
+                            messages=[
+                                {"role": "system", "content": "You are a friendly research assistant."},
+                                {"role": "user", "content": conversational_prompt}
+                            ],
+                            temperature=0.7,
+                            max_tokens=200
+                        )
+
+                        conversational_response = response.choices[0].message.content.strip()
+                        st.markdown(conversational_response)
+                        st.session_state.research_chat_messages.append({
+                            "role": "assistant",
+                            "content": conversational_response
+                        })
+                        st.rerun()
+
+                    else:
+                        # Intent is 'research_request' - proceed with research flow
+
+                        # Check if this is a follow-up question about existing research
+                        if st.session_state.current_research and not any(
+                            keyword in prompt.lower()
+                            for keyword in ['research', 'study', 'investigate', 'find out about', 'tell me about', 'search for']
+                        ):
+                            # This looks like a follow-up question about current research
+                            response = generate_chat_response(
+                                prompt,
+                                research_context=st.session_state.current_research
+                            )
+                            st.markdown(response)
+                            st.session_state.research_chat_messages.append({
+                                "role": "assistant",
+                                "content": response
+                            })
+                            st.rerun()
+
+                        else:
+                            # This is a new research topic - check for ambiguity
+                            ambiguity_result = check_topic_ambiguity(prompt)
+
+                            if ambiguity_result['is_ambiguous']:
+                                # Topic is ambiguous - ask for clarification
+                                clarification_msg = f"""I'd be happy to research that, but I need some clarification first:
 
 **Reasoning:** {ambiguity_result['reasoning']}
 
 **Questions to help narrow it down:**
 """
-                            for i, question in enumerate(ambiguity_result['clarification_questions'], 1):
-                                clarification_msg += f"\n{i}. {question}"
+                                for i, question in enumerate(ambiguity_result['clarification_questions'], 1):
+                                    clarification_msg += f"\n{i}. {question}"
 
-                            clarification_msg += "\n\nPlease provide more details so I can conduct better research for you!"
+                                clarification_msg += "\n\nPlease provide more details so I can conduct better research for you!"
 
-                            st.markdown(clarification_msg)
-                            st.session_state.research_chat_messages.append({
-                                "role": "assistant",
-                                "content": clarification_msg
-                            })
-
-                            # Mark that we're awaiting clarification
-                            st.session_state.awaiting_clarification = True
-                            st.session_state.pending_topic = prompt
-                            st.rerun()
-
-                        else:
-                            # Topic is clear - proceed with research
-                            st.markdown(f"Great topic! I'll research: **{prompt}**")
-                            st.session_state.research_chat_messages.append({
-                                "role": "assistant",
-                                "content": f"Great topic! I'll research: **{prompt}**"
-                            })
-
-                            # Conduct research
-                            try:
-                                progress_placeholder = st.empty()
-                                progress_placeholder.text("Starting research...")
-
-                                # Use fixed collection name for all web research
-                                research_vector_store = ChromaDBStore()
-                                research_vector_store.set_collection(settings.RESEARCH_COLLECTION_NAME)
-                                research_agent = ResearchAgent(research_vector_store, search_depth="basic")
-
-                                # Conduct research with default settings
-                                result = research_agent.conduct_research(
-                                    topic=prompt,
-                                    num_queries=4,
-                                    progress_callback=lambda msg, pct: progress_placeholder.text(msg)
-                                )
-
-                                progress_placeholder.empty()
-
-                                # Store in session state
-                                research_record = {
-                                    'topic': prompt,
-                                    'report': result['report'],
-                                    'sources': result['sources'],
-                                    'timestamp': datetime.now().isoformat(),
-                                    'num_sources': len(result['sources']),
-                                    'num_chunks': result['num_chunks'],
-                                    'search_quality': result['search_quality']
-                                }
-
-                                st.session_state.current_research = research_record
-                                st.session_state.research_history.insert(0, research_record)
-
-                                # Show success message in chat
-                                success_msg = f"✅ Research complete! I found {len(result['sources'])} sources. Check below for the full report!"
-                                st.markdown(success_msg)
+                                st.markdown(clarification_msg)
                                 st.session_state.research_chat_messages.append({
                                     "role": "assistant",
-                                    "content": success_msg
+                                    "content": clarification_msg
                                 })
 
+                                # Mark that we're awaiting clarification
+                                st.session_state.awaiting_clarification = True
+                                st.session_state.pending_topic = prompt
                                 st.rerun()
 
-                            except Exception as e:
-                                error_msg = f"❌ Research failed: {str(e)}"
-                                st.markdown(error_msg)
+                            else:
+                                # Topic is clear - ask for confirmation before research
+                                confirm_msg = f"""Great! I can research: **{prompt}**
+
+I'll search multiple web sources and create a comprehensive report with citations.
+
+**Search parameters:**
+- Search depth: Basic (faster, good for most topics)
+- Number of queries: 4 (diverse perspectives)
+- Estimated time: 20-30 seconds
+- Cost: ~$0.05
+
+Would you like me to proceed with this research? (yes/no)"""
+
+                                st.markdown(confirm_msg)
                                 st.session_state.research_chat_messages.append({
                                     "role": "assistant",
-                                    "content": error_msg
+                                    "content": confirm_msg
                                 })
+
+                                # Mark that we're awaiting confirmation
+                                st.session_state.awaiting_confirmation = True
+                                st.session_state.pending_topic = prompt
+                                st.session_state.pending_search_params = {'depth': 'basic', 'num_queries': 4}
+                                st.rerun()
 
 
 def render_research_mode():
