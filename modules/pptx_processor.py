@@ -91,15 +91,32 @@ class PowerPointProcessor:
             slides_data = []
             images_extracted = 0
 
-            for slide_num, slide in enumerate(presentation.slides[:slides_to_process], 1):
-                slide_data = self._process_slide(slide, slide_num, total_slides)
-                slides_data.append(slide_data)
+            # Convert slides to list to enable slicing
+            all_slides = list(presentation.slides)
+            slides_to_iterate = all_slides[:slides_to_process]
 
-                if slide_data.get('images'):
-                    images_extracted += len(slide_data['images'])
+            for slide_num, slide in enumerate(slides_to_iterate, 1):
+                try:
+                    slide_data = self._process_slide(slide, slide_num, total_slides)
+                    slides_data.append(slide_data)
 
-                if slide_num % 10 == 0:
-                    print(f"Processed {slide_num}/{slides_to_process} slides...")
+                    if slide_data.get('images'):
+                        images_extracted += len(slide_data['images'])
+
+                    if slide_num % 10 == 0:
+                        print(f"Processed {slide_num}/{slides_to_process} slides...")
+                except Exception as e:
+                    print(f"Error processing slide {slide_num}: {e}")
+                    # Create minimal slide data for failed slides
+                    slides_data.append({
+                        'slide_number': slide_num,
+                        'total_slides': total_slides,
+                        'title': f'Slide {slide_num} (Processing Error)',
+                        'body': '',
+                        'notes': '',
+                        'images': [],
+                        'layout': 'Unknown'
+                    })
 
             print(f"✓ Extraction complete: {slides_to_process} slides, {images_extracted} images")
 
@@ -112,6 +129,8 @@ class PowerPointProcessor:
 
         except Exception as e:
             print(f"Error processing PowerPoint: {e}")
+            import traceback
+            traceback.print_exc()
             return {
                 'slides': [],
                 'total_slides': 0,
@@ -150,8 +169,15 @@ class PowerPointProcessor:
             'body': '',
             'notes': '',
             'images': [],
-            'layout': slide.slide_layout.name if hasattr(slide.slide_layout, 'name') else 'Unknown'
+            'layout': 'Unknown'
         }
+
+        # Try to get layout name safely
+        try:
+            if hasattr(slide, 'slide_layout') and hasattr(slide.slide_layout, 'name'):
+                slide_data['layout'] = slide.slide_layout.name
+        except:
+            pass  # Keep default 'Unknown'
 
         # Extract title
         if slide.shapes.title:
@@ -210,7 +236,14 @@ class PowerPointProcessor:
                     image_count += 1
 
                     # Get image binary data
+                    # Some shapes may not have a proper image part, skip those
+                    if not hasattr(shape, 'image'):
+                        continue
+
                     image = shape.image
+                    if not image or not hasattr(image, 'blob'):
+                        continue
+
                     image_bytes = image.blob
 
                     # Load with PIL to get dimensions
