@@ -349,6 +349,104 @@ PPTX_CHUNK_SIZE = int(os.getenv("PPTX_CHUNK_SIZE", "1000"))
 PRESERVE_SLIDE_STRUCTURE = os.getenv("PRESERVE_SLIDE_STRUCTURE", "true").lower() == "true"
 
 # ============================================================================
+# Excel Processing Configuration
+# ============================================================================
+
+# Enable/disable Excel (.xlsx, .xls) file processing
+#
+# Learning Note - Excel Support:
+# ------------------------------
+# Excel files contain structured tabular data:
+# - Multiple sheets (tabs) with different data
+# - Rows and columns of cells
+# - Formulas and calculated values
+# - Headers and data relationships
+#
+# When enabled, each sheet becomes searchable with structure preserved
+ENABLE_EXCEL_PROCESSING = os.getenv("ENABLE_EXCEL_PROCESSING", "true").lower() == "true"
+
+# Maximum sheets per Excel file
+#
+# Learning Note - Sheet Limits:
+# -----------------------------
+# Large Excel files can have 50+ sheets
+# Processing all sheets ensures complete coverage but takes time
+# 10 sheets is reasonable for most workbooks:
+# - Financial reports: ~5-10 sheets
+# - Data analysis: ~3-8 sheets
+# - Complex dashboards: ~10-15 sheets
+MAX_SHEETS_PER_FILE = int(os.getenv("MAX_SHEETS_PER_FILE", "10"))
+
+# Maximum rows per sheet
+#
+# Learning Note - Row Limits:
+# ---------------------------
+# Excel sheets can have 1 million+ rows
+# Processing massive sheets can be slow and memory-intensive
+# 1000 rows captures most useful data:
+# - Summary tables: 10-100 rows
+# - Reports: 50-500 rows
+# - Data exports: 100-1000+ rows
+#
+# For larger datasets, users should filter/summarize first
+MAX_ROWS_PER_SHEET = int(os.getenv("MAX_ROWS_PER_SHEET", "1000"))
+
+# Include empty cells in output
+#
+# Learning Note - Empty Cells:
+# ----------------------------
+# Excel sheets often have empty cells for formatting
+# Including them makes output verbose and less useful
+# Skipping them (False) produces cleaner, more searchable text
+#
+# Empty cells are typically:
+# - Spacing for visual layout
+# - Unused areas of the sheet
+# - Formatting placeholders
+INCLUDE_EMPTY_CELLS = os.getenv("INCLUDE_EMPTY_CELLS", "false").lower() == "true"
+
+# Preserve Excel formulas
+#
+# Learning Note - Formulas:
+# -------------------------
+# Excel cells can contain formulas (=SUM(A1:A10))
+# By default, we only show calculated values (e.g., 150)
+#
+# When True: Show both formula and value
+# When False: Show only the calculated value
+#
+# Most users want values, not formulas
+PRESERVE_FORMULAS = os.getenv("PRESERVE_FORMULAS", "false").lower() == "true"
+
+# Chunk size for Excel content
+#
+# Learning Note - Excel Chunking:
+# -------------------------------
+# Excel data is tabular and related
+# Larger chunks preserve table structure:
+# - Keep related rows together
+# - Maintain column relationships
+# - Preserve table context
+#
+# 1500 characters ≈ 10-20 rows of data
+EXCEL_CHUNK_SIZE = int(os.getenv("EXCEL_CHUNK_SIZE", "1500"))
+
+# Excel chunking strategy
+#
+# Learning Note - Chunking Strategies:
+# ------------------------------------
+# by_sheet: Each sheet = one chunk (recommended)
+#   - Preserves complete tables
+#   - Natural logical boundaries
+#   - Easier to reference ("see Sheet1")
+#
+# by_rows: Split large sheets into row chunks
+#   - Better for very large sheets
+#   - May split related data
+#   - Use when sheets exceed MAX_ROWS_PER_SHEET
+EXCEL_CHUNKING_STRATEGY = os.getenv("EXCEL_CHUNKING_STRATEGY", "by_sheet")
+
+# ============================================================================
 # Directory Setup
 # ============================================================================
 

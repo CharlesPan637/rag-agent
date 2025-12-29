@@ -293,6 +293,10 @@ def display_sources(sources: list, use_expanders: bool = True):
                     expander_title += f" (Slide {slide}: {slide_title})"
                 else:
                     expander_title += f" (Slide {slide})"
+            elif 'sheet_name' in metadata:
+                # Text from an Excel sheet
+                sheet_name = metadata.get('sheet_name', 'unknown')
+                expander_title += f" (Sheet: {sheet_name})"
             expander_title += f" - Similarity: {similarity:.2%}"
 
             with st.expander(expander_title):
@@ -330,6 +334,19 @@ def display_sources(sources: list, use_expanders: bool = True):
                     st.markdown(description)
                 else:
                     # Display text content
+                    # Show Excel-specific metadata if available
+                    if 'sheet_name' in metadata:
+                        st.markdown(f"**Sheet:** {metadata.get('sheet_name', 'unknown')}")
+                        if 'num_rows' in metadata and 'num_cols' in metadata:
+                            st.markdown(f"**Dimensions:** {metadata['num_rows']} rows × {metadata['num_cols']} columns")
+                        if 'columns' in metadata and metadata['columns']:
+                            cols = metadata['columns']
+                            cols_preview = cols[:5]  # Show first 5 columns
+                            cols_str = ', '.join(str(c) for c in cols_preview)
+                            if len(cols) > 5:
+                                cols_str += f", ... ({len(cols)} total)"
+                            st.markdown(f"**Columns:** {cols_str}")
+
                     st.markdown("**Content:**")
                     st.text(source['text'])
         else:
@@ -1006,9 +1023,9 @@ def render_document_qa_mode():
         # File uploader
         uploaded_files = st.file_uploader(
             "Upload documents",
-            type=['pdf', 'docx', 'pptx', 'txt'],
+            type=['pdf', 'docx', 'pptx', 'xlsx', 'xls', 'txt'],
             accept_multiple_files=True,
-            help="Upload PDF, Word, PowerPoint, or text files"
+            help="Upload PDF, Word, PowerPoint, Excel, or text files"
         )
 
         # Process button

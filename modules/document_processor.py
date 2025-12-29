@@ -47,6 +47,14 @@ except ImportError:
     PPTX_PROCESSING_AVAILABLE = False
     print("PowerPoint processing module not available.")
 
+# Excel processing (conditional import)
+try:
+    from modules.excel_processor import ExcelProcessor
+    EXCEL_PROCESSING_AVAILABLE = True
+except ImportError:
+    EXCEL_PROCESSING_AVAILABLE = False
+    print("Excel processing module not available.")
+
 
 class DocumentParser:
     """
@@ -56,6 +64,7 @@ class DocumentParser:
     - PDF (.pdf) - using pypdf
     - Microsoft Word (.docx) - using python-docx
     - Microsoft PowerPoint (.pptx) - using python-pptx
+    - Microsoft Excel (.xlsx, .xls) - using pandas
     - Plain text (.txt) - with automatic encoding detection
     """
 
@@ -265,6 +274,74 @@ class DocumentParser:
             raise ValueError(f"Error parsing PowerPoint file: {str(e)}")
 
     @staticmethod
+    def parse_excel(file: BinaryIO) -> str:
+        """
+        Extract text from an Excel file.
+
+        Args:
+            file: Binary file object (XLSX or XLS)
+
+        Returns:
+            str: Extracted text from all sheets
+
+        Learning Note - Excel vs Other Formats:
+        ---------------------------------------
+        Excel files have unique structure:
+        - Multiple sheets with tabular data
+        - Rows and columns of cells
+        - Headers and data types
+        - Formulas and calculated values
+
+        We extract text-only here. Full Excel processing with structure
+        preservation is handled in process_document() using ExcelProcessor.
+
+        This method is used when ENABLE_EXCEL_PROCESSING=False or
+        when only text extraction is needed.
+        """
+        try:
+            import pandas as pd
+
+            # Read all sheets
+            excel_file = pd.ExcelFile(file, engine='openpyxl')
+
+            text_parts = []
+
+            for sheet_name in excel_file.sheet_names:
+                # Read sheet
+                df = pd.read_excel(excel_file, sheet_name=sheet_name, nrows=settings.MAX_ROWS_PER_SHEET)
+
+                # Add sheet header
+                text_parts.append(f"\n=== Sheet: {sheet_name} ===\n")
+
+                # Convert to string representation
+                # This gives a basic text view of the data
+                if not df.empty:
+                    # Get column headers
+                    text_parts.append(f"Columns: {', '.join(df.columns.astype(str))}\n")
+
+                    # Add data rows
+                    for idx, row in df.iterrows():
+                        row_data = []
+                        for col in df.columns:
+                            value = row[col]
+                            if pd.notna(value):  # Skip empty cells
+                                row_data.append(f"{col}={value}")
+                        if row_data:
+                            text_parts.append(f"Row {idx + 1}: {', '.join(row_data)}\n")
+                else:
+                    text_parts.append("(Empty sheet)\n")
+
+            full_text = "".join(text_parts)
+
+            if not full_text.strip():
+                raise ValueError("Excel file appears to be empty")
+
+            return full_text
+
+        except Exception as e:
+            raise ValueError(f"Error parsing Excel file: {str(e)}")
+
+    @staticmethod
     def parse_document(file: BinaryIO, file_type: str) -> str:
         """
         Route document to appropriate parser based on file type.
@@ -287,6 +364,8 @@ class DocumentParser:
             return DocumentParser.parse_docx(file)
         elif file_type == '.pptx':
             return DocumentParser.parse_pptx(file)
+        elif file_type in ['.xlsx', '.xls']:
+            return DocumentParser.parse_excel(file)
         elif file_type == '.txt':
             return DocumentParser.parse_txt(file)
         else:
@@ -483,6 +562,11 @@ class TextChunker:
         if file_type.lower() == '.pptx' and settings.ENABLE_PPTX_PROCESSING and PPTX_PROCESSING_AVAILABLE:
             print(f"\nProcessing PowerPoint with full slide structure preservation...")
             return TextChunker._process_powerpoint_full(file, filename)
+
+        # Special handling for Excel when full processing is enabled
+        if file_type.lower() in ['.xlsx', '.xls'] and settings.ENABLE_EXCEL_PROCESSING and EXCEL_PROCESSING_AVAILABLE:
+            print(f"\nProcessing Excel with full sheet structure preservation...")
+            return TextChunker._process_excel_full(file, filename)
 
         # Step 1: Parse document to get text
         file.seek(0)  # Reset file pointer
@@ -684,3 +768,93 @@ class TextChunker:
             text = DocumentParser.parse_pptx(file)
             chunks = TextChunker.chunk_by_sentences(text)
             return TextChunker.add_metadata(chunks, filename, '.pptx')
+
+    @staticmethod
+    def _process_excel_full(file: BinaryIO, filename: str) -> List[Dict[str, Any]]:
+        """
+        Process Excel with full sheet structure preservation.
+
+        Args:
+            file: Binary file object (XLSX or XLS)
+            filename: Original filename
+
+        Returns:
+            List of chunks with sheet structure and metadata
+
+        Learning Note - Full Excel Processing:
+        --------------------------------------
+        This method provides complete Excel processing:
+        1. Extract data from each sheet (rows, columns, values)
+        2. Preserve sheet structure (each sheet or row group = one chunk)
+        3. Maintain column headers and relationships
+        4. Create rich metadata (sheet names, dimensions, column names)
+
+        This is different from generic text extraction because:
+        - Sheets are natural chunk boundaries
+        - Tabular structure provides context
+        - Column names are metadata
+        - Cell relationships matter (not just plain text)
+
+        Chunking Strategies:
+        - by_sheet: Each sheet becomes one chunk (default, best for most cases)
+        - by_rows: Large sheets are split into multiple chunks by rows
+        """
+        try:
+            # Save file temporarily for processing
+            temp_file = None
+            try:
+                # Create temporary file
+                file.seek(0)
+
+                # Determine suffix from filename
+                file_ext = Path(filename).suffix.lower()
+                if file_ext not in ['.xlsx', '.xls']:
+                    file_ext = '.xlsx'  # Default to .xlsx
+
+                with tempfile.NamedTemporaryFile(
+                    delete=False,
+                    suffix=file_ext,
+                    dir=settings.IMAGE_TEMP_DIR
+                ) as temp_file:
+                    shutil.copyfileobj(file, temp_file)
+                    temp_path = temp_file.name
+
+                # Process Excel
+                excel_processor = ExcelProcessor()
+                excel_data = excel_processor.process_excel(temp_path)
+
+                if 'error' in excel_data:
+                    raise ValueError(excel_data['error'])
+
+                # Create sheet chunks
+                sheet_chunks = excel_processor.create_excel_chunks(
+                    excel_data['sheets'],
+                    filename
+                )
+
+                print(f"\nTotal Excel chunks: {len(sheet_chunks)} from {excel_data['processed_sheets']} sheets")
+
+                return sheet_chunks
+
+            finally:
+                # Clean up temporary file
+                if temp_file and Path(temp_path).exists():
+                    try:
+                        Path(temp_path).unlink()
+                    except Exception as e:
+                        print(f"Could not delete temp file: {e}")
+
+        except Exception as e:
+            print(f"Error in full Excel processing: {e}")
+            # Fallback to basic text extraction
+            print("Falling back to basic text extraction...")
+            file.seek(0)
+            text = DocumentParser.parse_excel(file)
+            chunks = TextChunker.chunk_by_sentences(text)
+
+            # Determine file type for metadata
+            file_ext = Path(filename).suffix.lower()
+            if file_ext not in ['.xlsx', '.xls']:
+                file_ext = '.xlsx'
+
+            return TextChunker.add_metadata(chunks, filename, file_ext)
